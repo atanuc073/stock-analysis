@@ -28,9 +28,13 @@ def compute(info: dict) -> dict:
 
     if pe is not None:
         if 0 < pe < 15:
-            score += 8; signals.append(f"Low P/E ({pe:.1f})")
+            score += 10; signals.append(f"Low P/E ({pe:.1f})")
+        elif 15 <= pe < 25:
+            score += 4
         elif pe > 60:
-            score -= 6; signals.append(f"High P/E ({pe:.1f})")
+            score -= 8; signals.append(f"High P/E ({pe:.1f})")
+        elif pe > 40:
+            score -= 4; signals.append(f"Rich P/E ({pe:.1f})")
     if pb is not None:
         if 0 < pb < 2:
             score += 4; signals.append(f"Low P/B ({pb:.2f})")

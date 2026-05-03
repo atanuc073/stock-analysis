@@ -37,8 +37,20 @@ def compute(df: pd.DataFrame) -> dict:
     vol_spike = float(vol.iloc[last]) >= VOLUME_SPIKE_MULT * avg_vol_20
     high_52w = float(close.tail(252).max()) if len(close) >= 50 else float(close.max())
     low_52w = float(close.tail(252).min()) if len(close) >= 50 else float(close.min())
-    near_52w_high = price >= 0.97 * high_52w
-    near_52w_low = price <= 1.03 * low_52w
+    pct_from_52w_high = (price / high_52w - 1) * 100  # negative number; 0 = at high
+    pct_from_52w_low = (price / low_52w - 1) * 100    # positive number; 0 = at low
+
+    # Extension / pullback context
+    extended_at_high = pct_from_52w_high > -3      # within 3% of 52w high (danger zone)
+    in_base = -25 <= pct_from_52w_high <= -8       # 8-25% off high (consolidation / base)
+    deep_pullback = -40 <= pct_from_52w_high < -25  # deep pullback (early-stage opportunity)
+    far_from_low = pct_from_52w_low > 30           # not in collapse mode
+
+    # 30-day range — are we breaking out at the top, or pulling back inside the range?
+    high_30 = float(close.tail(30).max()) if len(close) >= 30 else high_52w
+    low_30 = float(close.tail(30).min()) if len(close) >= 30 else low_52w
+    pct_from_30d_high = (price / high_30 - 1) * 100
+    pulled_back_in_range = pct_from_30d_high <= -3 and far_from_low  # 3%+ off 30d high
 
     # Scoring
     score = 50.0
@@ -46,7 +58,10 @@ def compute(df: pd.DataFrame) -> dict:
     if rsi_v < RSI_OVERSOLD:
         score += 8; signals.append(f"RSI oversold ({rsi_v:.1f})")
     elif rsi_v > RSI_OVERBOUGHT:
-        score -= 8; signals.append(f"RSI overbought ({rsi_v:.1f})")
+        score -= 10; signals.append(f"RSI overbought ({rsi_v:.1f})")
+    elif rsi_v >= 60:
+        # Late-stage strong: only neutral, not bonus
+        score -= 2
     if macd_cross_up:
         score += 10; signals.append("MACD bullish cross")
     if macd_cross_dn:
@@ -59,14 +74,24 @@ def compute(df: pd.DataFrame) -> dict:
         score -= 12; signals.append("Death cross (50/200)")
     if vol_spike:
         score += 5; signals.append(f"Volume spike {vol.iloc[last]/avg_vol_20:.1f}x")
-    if near_52w_high:
-        score += 6; signals.append("Near 52-week high")
-    if near_52w_low:
-        score += 4; signals.append("Near 52-week low (potential bounce)")
+
+    # ── Extension / Base scoring (FLIPPED from original) ─────────────────
+    # The old code rewarded "near 52w high" — that's how we bought tops.
+    # Now: penalize chasing tops, reward stocks consolidating in a base.
+    if extended_at_high:
+        score -= 12; signals.append(f"⚠️ Extended {pct_from_52w_high:+.1f}% from 52w high")
+    elif in_base and far_from_low:
+        score += 10; signals.append(f"In base ({pct_from_52w_high:.1f}% off high)")
+    elif deep_pullback and above_200:
+        score += 6; signals.append(f"Deep pullback in uptrend ({pct_from_52w_high:.1f}%)")
+
+    if pulled_back_in_range and above_50:
+        score += 4; signals.append("Pulled back in 30d range (better entry)")
+
     if 0 <= bb_pct.iloc[last] <= 0.05:
         score += 4; signals.append("At lower Bollinger band")
     if bb_pct.iloc[last] >= 0.95:
-        score -= 4; signals.append("At upper Bollinger band")
+        score -= 6; signals.append("At upper Bollinger band (extended)")
 
     score = float(np.clip(score, 0, 100))
 
@@ -79,6 +104,9 @@ def compute(df: pd.DataFrame) -> dict:
         "above_sma200": above_200,
         "high_52w": high_52w,
         "low_52w": low_52w,
-        "pct_from_52w_high": (price / high_52w - 1) * 100,
+        "pct_from_52w_high": pct_from_52w_high,
+        "pct_from_52w_low": pct_from_52w_low,
+        "in_base": bool(in_base),
+        "extended_at_high": bool(extended_at_high),
         "volume_ratio": float(vol.iloc[last] / avg_vol_20) if avg_vol_20 else 1.0,
     }

@@ -54,13 +54,16 @@ WATCHLIST_US = [
 WATCHLIST = WATCHLIST_INDIA + WATCHLIST_US
 
 # ── Composite scoring weights (sum ≈ 1.0) ────────────────────────────────────
+# Rebalanced 2026-05: reduced technical (was over-rewarding extended stocks),
+# boosted fundamental for value-momentum pairing.
 SCORE_WEIGHTS = {
-    "technical": 0.35,
-    "fundamental": 0.25,
+    "technical": 0.20,
+    "fundamental": 0.35,
     "momentum": 0.15,
     "sentiment": 0.10,
     "forecast": 0.10,
     "options": 0.05,  # US only; auto-redistributed for IN tickers
+    "valuation": 0.05,  # cheap-vs-sector bonus (folded into fundamental)
 }
 
 # ── Technical thresholds ─────────────────────────────────────────────────────
