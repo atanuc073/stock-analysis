@@ -18,6 +18,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 log = logging.getLogger("daily")
 
 
