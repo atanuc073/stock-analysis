@@ -113,15 +113,23 @@ def _fetch_one(symbol: str, start: str, end: str) -> HistoricalData | None:
 
 
 def load_universe(symbols: list[str], start: str, end: str,
-                  max_workers: int = 4) -> dict[str, HistoricalData]:
-    """Load full history for a universe of symbols. Cached on disk."""
+                  max_workers: int = 4, warmup_days: int = 365) -> dict[str, HistoricalData]:
+    """Load full history for a universe of symbols. Cached on disk.
+
+    `warmup_days` extends the fetch start backward so indicators (200DMA,
+    12-1 momentum, ATR) are mature when the actual backtest begins at `start`.
+    Trading-date selection in `trading_dates()` still respects the original
+    `start`, so warmup data does not affect rebalances.
+    """
+    fetch_start = (pd.Timestamp(start) - pd.Timedelta(days=warmup_days)).strftime("%Y-%m-%d")
     out: dict[str, HistoricalData] = {}
-    
-    log.info("Loading %d symbols using %d workers (staggered)", len(symbols), max_workers)
+
+    log.info("Loading %d symbols using %d workers (staggered, warmup=%dd → fetch from %s)",
+             len(symbols), max_workers, warmup_days, fetch_start)
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {}
         for s in symbols:
-            futures[ex.submit(_fetch_one, s, start, end)] = s
+            futures[ex.submit(_fetch_one, s, fetch_start, end)] = s
             time.sleep(0.15)  # Stagger to avoid Yahoo 429 Rate Limits
             
         for fut in tqdm(as_completed(futures), total=len(futures), desc="Loading history"):

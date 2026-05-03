@@ -13,8 +13,8 @@ DEFAULT_TIERS = (
     (0.20, 1 / 3, 0.0),     # T1 — sell 33%, move stop to break-even
     (0.35, 1 / 3, 0.15),    # T2 — sell 33%, lock +15%
 )
-DEFAULT_ATR_STOP_MULT = 2.5
-DEFAULT_HARD_STOP_PCT = 0.12         # never risk more than 12% per position
+DEFAULT_ATR_STOP_MULT = 3.0
+DEFAULT_HARD_STOP_PCT = 0.15         # cap per-position loss at 15%
 DEFAULT_TRAILING_PCT = 0.15          # trail 15% off peak after T2
 DEFAULT_TIME_STOP_DAYS = 365
 DEFAULT_TIME_STOP_BAND = (-0.05, 0.10)  # if return between -5% and +10% at time-stop, exit
@@ -53,8 +53,13 @@ class PositionFactory:
 
         atr_stop = entry_price - self.params.atr_stop_mult * max(atr, 0.0)
         hard_stop = entry_price * (1 - self.params.hard_stop_pct)
-        # take the *higher* (tighter, smaller loss) of the two — but never above entry
-        initial_stop = min(entry_price * 0.999, max(atr_stop, hard_stop))
+        # Use the WIDER of ATR/hard (give the trade room), but never
+        # looser than the hard floor and never above entry.
+        # min(atr_stop, hard_stop) = lower price = wider stop.
+        wider = min(atr_stop, hard_stop)
+        # Floor at hard_stop so total risk is capped:
+        initial_stop = max(wider, hard_stop)
+        initial_stop = min(entry_price * 0.999, initial_stop)
 
         tiers = [
             TierLevel(
