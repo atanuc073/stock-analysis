@@ -57,12 +57,14 @@ def compute(result: BacktestResult, risk_free_rate: float = 0.06) -> Performance
     years = max(days / 365.25, 1e-9)
     cagr = ((final / initial) ** (1 / years) - 1) * 100 if final > 0 else -100.0
 
-    # Daily returns (forward-fill duplicate dates if any)
-    daily = eq["equity"].resample("D").last().ffill()
+    # Trading-day returns (DO NOT resample to calendar days — weekend zeros
+    # destroy std/mean and make Sharpe meaningless)
+    daily = eq["equity"].groupby(eq.index).last().sort_index()
     rets = daily.pct_change().dropna()
 
     ann_vol = float(rets.std() * np.sqrt(252) * 100)
-    excess = rets - (risk_free_rate / 252)
+    rf_daily = risk_free_rate / 252
+    excess = rets - rf_daily
     sharpe = float(excess.mean() / rets.std() * np.sqrt(252)) if rets.std() > 0 else 0.0
 
     downside = rets[rets < 0]
