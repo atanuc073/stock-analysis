@@ -1,0 +1,14 @@
+# Optional: TimesFM forecaster (Google's time-series foundation model)
+#
+# Install on PERSONAL machine only (~2 GB total).
+# Then set FORECASTER=timesfm in your .env
+#
+# Install command:
+#   pip install -r requirements-timesfm.txt --index-url https://pypi.org/simple
+#
+# First run downloads ~800 MB model from HuggingFace (cached at ~/.cache/huggingface)
+# CPU-only is fine; GPU (CUDA) auto-detected if available for ~10x speedup.
+
+timesfm[torch]>=1.2.0
+torch>=2.1.0
+huggingface-hub>=0.20.0

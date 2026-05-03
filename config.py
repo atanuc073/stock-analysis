@@ -18,6 +18,9 @@ TOP_N = int(os.getenv("TOP_N", "15"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))  # parallel ticker downloads (8 = good speed/rate-limit balance)
 FETCH_DELAY_MS = int(os.getenv("FETCH_DELAY_MS", "200"))  # ms stagger per thread to avoid Yahoo 429s
 
+# Forecaster: "linear" (fast, default), "prophet" (medium), "timesfm" (best, needs ~2GB deps)
+FORECASTER = os.getenv("FORECASTER", "linear").lower()
+
 # ── Telegram ─────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
