@@ -27,6 +27,7 @@ from portfolio.lifecycle import (
 
 from .data_loader import HistoricalData
 from .scoring import score_at, price_at, BacktestScore
+from . import regime as regime_mod
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +45,9 @@ class BacktestConfig:
     transaction_cost_bps: float = 10.0         # 10 bps each side (0.10%)
     slippage_bps: float = 5.0                  # 5 bps slippage
     include_forecast: bool = False             # forecast slow; off by default
+    use_regime: bool = True                     # enable market regime filter
+    regime_skip_below: str = "BEAR"            # skip entries at or below this regime
+    regime_check_freq_days: int = 5            # re-evaluate regime every N days
 
     @property
     def cost_per_side(self) -> float:
