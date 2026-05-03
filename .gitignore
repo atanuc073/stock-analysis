@@ -1,0 +1,23 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+.venv/
+venv/
+reports/
+cache/
+*.log
+# Personal data — never commit
+portfolio.json
+portfolio.json.tmp
+# Corporate SSL bundle — machine-specific
+corp-ca-bundle.pem
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+# Archives / backups
+*.zip
+*.tar.gz
