@@ -28,6 +28,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 log = logging.getLogger("backtest.cli")
 
 

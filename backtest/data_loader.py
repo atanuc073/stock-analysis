@@ -67,10 +67,10 @@ def _fetch_one(symbol: str, start: str, end: str) -> HistoricalData | None:
                 if "rate" in msg or "429" in msg:
                     time.sleep(2 ** attempt + 1)
                     continue
-                log.warning("fetch %s failed: %s", symbol, e)
+                log.debug("fetch %s failed: %s", symbol, e)
                 return None
         else:
-            log.warning("fetch %s gave up after retries", symbol)
+            log.debug("fetch %s gave up after retries", symbol)
             return None
 
     if history.empty:
