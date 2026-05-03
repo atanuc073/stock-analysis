@@ -8,16 +8,19 @@ from .models import Position, TierLevel, ExitSignal, ExitType, PositionStatus
 
 
 # ── Configuration (overridable via constructor) ──────────────────────────────
+# New rule (May 2026):
+#   T1: at +30% sell 33%, lock break-even stop
+#   After T1: trail 25% off peak, sell remainder when hit
+#   Time stop: at 1y if return < +30%, sell all
 DEFAULT_TIERS = (
     # (pct_gain, sell_fraction, new_stop_pct_relative_to_entry)
-    (0.20, 1 / 3, 0.0),     # T1 — sell 33%, move stop to break-even
-    (0.35, 1 / 3, 0.15),    # T2 — sell 33%, lock +15%
+    (0.30, 1 / 3, 0.0),     # T1 — sell 33%, move stop to break-even
 )
 DEFAULT_ATR_STOP_MULT = 3.0
 DEFAULT_HARD_STOP_PCT = 0.15         # cap per-position loss at 15%
-DEFAULT_TRAILING_PCT = 0.15          # trail 15% off peak after T2
+DEFAULT_TRAILING_PCT = 0.25          # trail 25% off peak after T1
 DEFAULT_TIME_STOP_DAYS = 365
-DEFAULT_TIME_STOP_BAND = (-0.05, 0.10)  # if return between -5% and +10% at time-stop, exit
+DEFAULT_TIME_STOP_BAND = (-1.0, 0.30)  # at 1y, exit if return < +30%
 DEFAULT_THESIS_BREAK_SCORE = 50.0
 
 
@@ -158,9 +161,9 @@ class ExitEvaluator:
                     pnl_abs=(current_price - position.entry_price) * qty_to_sell,
                 ))
 
-        # 5) TRAILING stop on remainder (only after all tiers triggered)
-        all_tiers_done = all(t.triggered for t in position.tiers)
-        if all_tiers_done and position.qty_open > 0:
+        # 5) TRAILING stop on remainder (only after T1 triggered)
+        any_tier_done = any(t.triggered for t in position.tiers)
+        if any_tier_done and position.qty_open > 0:
             trail_stop = position.peak_price * (1 - self.cfg.trailing_pct)
             if current_price <= trail_stop:
                 signals.append(self._full_exit(
