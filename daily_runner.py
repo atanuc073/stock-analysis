@@ -25,6 +25,7 @@ from data_sources.universe import broad_universe
 from data_sources.yahoo import fetch_many, TickerData
 from analysis.composite import analyze
 from analysis.indicators import atr, annualized_volatility
+from analysis import forecast as forecast_dispatcher
 
 from portfolio.models import ExitSignal
 from factories import (
@@ -43,6 +44,16 @@ log = logging.getLogger("daily")
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 @dataclass
+class HorizonForecast:
+    horizon_days: int
+    forecast_price: float | None
+    expected_return_pct: float | None
+    lower: float | None = None
+    upper: float | None = None
+    model: str = ""
+
+
+@dataclass
 class CandidateBundle:
     candidate: TradeCandidate
     sizing_rupees: float
@@ -50,6 +61,35 @@ class CandidateBundle:
     sizing_reasoning: str
     gate_summary: str
     approved: bool
+    forecasts: list[HorizonForecast] = None  # type: ignore[assignment]
+
+
+def _multi_horizon_forecast(history, horizons: tuple[int, ...] = (30, 60)
+                            ) -> list[HorizonForecast]:
+    """Run the configured forecaster at multiple horizons.
+
+    Uses the same dispatcher as composite scoring, so respects FORECASTER env var.
+    Falls back to linear-trend forecasts if TimesFM/Prophet unavailable.
+    """
+    out: list[HorizonForecast] = []
+    for h in horizons:
+        try:
+            r = forecast_dispatcher.compute(history, horizon_days=h)
+            out.append(HorizonForecast(
+                horizon_days=h,
+                forecast_price=r.get("forecast_price"),
+                expected_return_pct=r.get("expected_return_pct"),
+                lower=r.get("lower"),
+                upper=r.get("upper"),
+                model=r.get("model", ""),
+            ))
+        except Exception as e:
+            log.debug("Forecast %dd failed for series: %s", h, e)
+            out.append(HorizonForecast(
+                horizon_days=h, forecast_price=None,
+                expected_return_pct=None, model="error",
+            ))
+    return out
 
 
 def _build_portfolio_context(svc, prices: dict, regime, sector_lookup,
@@ -197,6 +237,16 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True) -> None:
         if len([b for b in candidate_bundles if b.approved]) >= top_n:
             break
 
+    # 10b) Multi-horizon forecasts for APPROVED candidates only (expensive)
+    log.info("Running 30d/60d forecasts on %d approved candidates ...",
+             sum(1 for b in candidate_bundles if b.approved))
+    for b in candidate_bundles:
+        if not b.approved:
+            continue
+        td = data.get(b.candidate.symbol)
+        if td and td.ok:
+            b.forecasts = _multi_horizon_forecast(td.history, horizons=(30, 60))
+
     # 11) Render report
     md = _render_markdown(
         regime, sector_lookup, snap, state, held_prices,
@@ -338,15 +388,39 @@ def _render_markdown(regime, sector_lookup, snap, state, prices,
     if not approved:
         L.append("_No candidates passed all risk checks today._\n")
     else:
-        L.append("| Symbol | Mkt | Sector | Score | Price | Stop | T1 (+20%) | T2 (+35%) | Suggested ₹ | Weight |")
-        L.append("|---|---|---|---|---|---|---|---|---|---|")
+        L.append("| Symbol | Mkt | Sector | Score | Price | Stop | T1 (+20%) | T2 (+35%) | 30d Fcst | 60d Fcst | Suggested ₹ | Weight |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
         for b in approved:
             c = b.candidate
             stop = c.price - 2.5 * c.atr
             stop = max(stop, c.price * 0.88)
+            f30 = _fmt_horizon(b.forecasts, 30)
+            f60 = _fmt_horizon(b.forecasts, 60)
             L.append(f"| `{c.symbol}` | {c.market} | {c.sector[:14]} | {c.score:.0f} | {c.price:.2f} "
                      f"| {stop:.2f} | {c.price*1.20:.2f} | {c.price*1.35:.2f} "
+                     f"| {f30} | {f60} "
                      f"| {b.sizing_rupees:,.0f} | {b.weight_pct:.1f}% |")
+
+        # Forecast detail (price + range + model)
+        any_fcst = any(b.forecasts for b in approved)
+        if any_fcst:
+            model_used = next((f.model for b in approved if b.forecasts
+                               for f in b.forecasts if f.model), "linear")
+            L.append(f"\n### 🔮 Forecast Detail (model: **{model_used}**)")
+            L.append("| Symbol | Current | 30d Target | 30d Range | 30d Δ | 60d Target | 60d Range | 60d Δ |")
+            L.append("|---|---|---|---|---|---|---|---|")
+            for b in approved:
+                if not b.forecasts:
+                    continue
+                c = b.candidate
+                f30 = _find_horizon(b.forecasts, 30)
+                f60 = _find_horizon(b.forecasts, 60)
+                L.append(
+                    f"| `{c.symbol}` | {c.price:.2f} "
+                    f"| {_price(f30)} | {_range(f30)} | {_pct(f30)} "
+                    f"| {_price(f60)} | {_range(f60)} | {_pct(f60)} |"
+                )
+
         L.append("\n### Sizing details")
         for b in approved[:10]:
             L.append(f"- `{b.candidate.symbol}`: {b.sizing_reasoning}")
@@ -361,6 +435,40 @@ def _render_markdown(regime, sector_lookup, snap, state, prices,
 
     L.append("\n---\n_⚠️ Automated analysis. Not investment advice._")
     return "\n".join(L)
+
+
+# ── Forecast formatting helpers ──────────────────────────────────────────────
+def _find_horizon(forecasts, days: int) -> HorizonForecast | None:
+    if not forecasts:
+        return None
+    for f in forecasts:
+        if f.horizon_days == days:
+            return f
+    return None
+
+
+def _fmt_horizon(forecasts, days: int) -> str:
+    """Compact cell: '+5.2%' or '—' for the candidate table."""
+    f = _find_horizon(forecasts, days)
+    if not f or f.expected_return_pct is None:
+        return "—"
+    return f"{f.expected_return_pct:+.1f}%"
+
+
+def _price(f: HorizonForecast | None) -> str:
+    return f"{f.forecast_price:.2f}" if f and f.forecast_price else "—"
+
+
+def _range(f: HorizonForecast | None) -> str:
+    if not f or f.lower is None or f.upper is None:
+        return "—"
+    return f"{f.lower:.2f}–{f.upper:.2f}"
+
+
+def _pct(f: HorizonForecast | None) -> str:
+    if not f or f.expected_return_pct is None:
+        return "—"
+    return f"{f.expected_return_pct:+.1f}%"
 
 
 def _render_telegram(regime, snap, exit_signals, flag_details, tax_advice, candidate_bundles) -> str:
@@ -394,8 +502,10 @@ def _render_telegram(regime, snap, exit_signals, flag_details, tax_advice, candi
         for b in approved:
             c = b.candidate
             flag = "🇮🇳" if c.market == "IN" else "🇺🇸"
+            f30 = _fmt_horizon(b.forecasts, 30)
+            f60 = _fmt_horizon(b.forecasts, 60)
             L.append(f"{flag} `{c.symbol}` ({c.score:.0f}) — {b.weight_pct:.1f}% (₹{b.sizing_rupees:,.0f})")
-            L.append(f"   T1 {c.price*1.20:.0f}  Stop {max(c.price - 2.5*c.atr, c.price*0.88):.0f}")
+            L.append(f"   T1 {c.price*1.20:.0f}  Stop {max(c.price - 2.5*c.atr, c.price*0.88):.0f}  | 30d {f30}  60d {f60}")
         L.append("")
 
     L.append("_⚠️ Not investment advice._")
