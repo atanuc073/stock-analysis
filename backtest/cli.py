@@ -1,0 +1,168 @@
+"""Backtest CLI entry point.
+
+Examples:
+  python -m backtest.cli --start 2019-01-01 --end 2024-12-31
+  python -m backtest.cli --start 2020-01-01 --end 2024-12-31 \
+      --capital 1000000 --universe india --threshold 70
+  python -m backtest.cli --start 2018-01-01 --end 2024-12-31 \
+      --universe watchlist --output-dir reports/backtest
+"""
+from __future__ import annotations
+import argparse
+import logging
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+
+from config import REPORTS_DIR, WATCHLIST, WATCHLIST_INDIA, WATCHLIST_US
+
+from .data_loader import load_universe, trading_dates
+from .engine import BacktestConfig, BacktestEngine
+from .results import compute as compute_stats
+from .reporter import write_excel, write_markdown, write_chart
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("backtest.cli")
+
+
+def _resolve_universe(name: str) -> list[str]:
+    name = name.lower()
+    if name == "watchlist":
+        return WATCHLIST
+    if name == "india":
+        return WATCHLIST_INDIA
+    if name == "us":
+        return WATCHLIST_US
+    if name == "broad":
+        try:
+            from data_sources.universe import broad_universe
+            return broad_universe()
+        except Exception as e:
+            log.warning("broad universe unavailable (%s); falling back to watchlist", e)
+            return WATCHLIST
+    # Treat as comma-separated list of tickers
+    return [s.strip() for s in name.split(",") if s.strip()]
+
+
+def _load_benchmark(symbol: str, start: str, end: str) -> pd.Series:
+    """Load benchmark close prices via yfinance."""
+    try:
+        import yfinance as yf
+        df = yf.Ticker(symbol).history(start=start, end=end, auto_adjust=True)
+        if df.empty:
+            return pd.Series(dtype=float)
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        return df["Close"]
+    except Exception as e:
+        log.warning("Failed to load benchmark %s: %s", symbol, e)
+        return pd.Series(dtype=float)
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(
+        description="Backtest the position-investing strategy.")
+    p.add_argument("--start", required=True, help="Backtest start date (YYYY-MM-DD)")
+    p.add_argument("--end", required=True, help="Backtest end date (YYYY-MM-DD)")
+    p.add_argument("--capital", type=float, default=1_000_000.0,
+                   help="Initial capital (default: ₹10,00,000)")
+    p.add_argument("--universe", default="watchlist",
+                   help="watchlist | india | us | broad | RELIANCE.NS,TCS.NS,...")
+    p.add_argument("--threshold", type=float, default=70.0,
+                   help="Min composite score to buy (default 70)")
+    p.add_argument("--rebalance-days", type=int, default=5,
+                   help="Rebalance every N trading days (default 5 = weekly)")
+    p.add_argument("--max-positions", type=int, default=12)
+    p.add_argument("--include-forecast", action="store_true",
+                   help="Include forecast component (slower)")
+    p.add_argument("--output-dir", default=None,
+                   help="Output directory (default reports/backtest/)")
+    p.add_argument("--max-workers", type=int, default=4,
+                   help="Concurrent fetches (default 4)")
+    p.add_argument("--benchmark-india", default="^NSEI")
+    p.add_argument("--benchmark-us", default="^GSPC")
+    args = p.parse_args(argv)
+
+    output_dir = Path(args.output_dir) if args.output_dir else REPORTS_DIR / "backtest"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1) Load universe
+    symbols = _resolve_universe(args.universe)
+    log.info("Universe: %d symbols (%s)", len(symbols), args.universe)
+
+    data = load_universe(symbols, args.start, args.end, max_workers=args.max_workers)
+    if not data:
+        log.error("No data loaded; aborting")
+        return 1
+    log.info("Loaded %d/%d symbols with sufficient data", len(data), len(symbols))
+
+    # 2) Trading dates
+    dates = trading_dates(data, args.start, args.end)
+    if len(dates) == 0:
+        log.error("No overlapping trading dates; aborting")
+        return 1
+
+    # 3) Run engine
+    cfg = BacktestConfig(
+        initial_capital=args.capital,
+        rebalance_freq_days=args.rebalance_days,
+        min_score=args.threshold,
+        max_positions=args.max_positions,
+        include_forecast=args.include_forecast,
+    )
+    engine = BacktestEngine(data=data, config=cfg)
+    result = engine.run(dates)
+
+    # 4) Stats
+    stats = compute_stats(result)
+
+    # 5) Benchmarks
+    benchmarks: dict[str, pd.Series] = {}
+    has_in = any(hd.is_indian for hd in data.values())
+    has_us = any(not hd.is_indian for hd in data.values())
+    if has_in:
+        benchmarks["Nifty 50"] = _load_benchmark(args.benchmark_india, args.start, args.end)
+    if has_us:
+        benchmarks["S&P 500"] = _load_benchmark(args.benchmark_us, args.start, args.end)
+
+    # 6) Reports
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base = f"backtest_{args.start}_{args.end}_{stamp}"
+    excel_path = output_dir / f"{base}.xlsx"
+    md_path = output_dir / f"{base}.md"
+    png_path = output_dir / f"{base}.png"
+
+    write_excel(result, stats, benchmarks, excel_path)
+    write_markdown(result, stats, md_path)
+    write_chart(result, benchmarks, png_path)
+
+    # 7) Console summary
+    print("\n" + "=" * 70)
+    print(f"BACKTEST COMPLETE — {result.start} → {result.end}")
+    print("=" * 70)
+    print(f"Initial Capital   : ₹{stats.initial_capital:,.0f}")
+    print(f"Final Equity      : ₹{stats.final_equity:,.0f}")
+    print(f"Total Return      : {stats.total_return_pct:+.2f}%")
+    print(f"CAGR              : {stats.cagr_pct:+.2f}%")
+    print(f"Max Drawdown      : {stats.max_drawdown_pct:.2f}%")
+    print(f"Sharpe Ratio      : {stats.sharpe_ratio:.2f}")
+    print(f"Win Rate          : {stats.win_rate_pct:.1f}%  ({stats.closed_trades} trades)")
+    print(f"Expectancy/Trade  : {stats.expectancy_pct:+.2f}%")
+    print(f"Profit Factor     : {stats.profit_factor:.2f}")
+    print(f"Avg Hold (days)   : {stats.avg_holding_days:.0f}")
+    print("\nReports:")
+    print(f"  Excel    : {excel_path}")
+    print(f"  Markdown : {md_path}")
+    print(f"  Chart    : {png_path}")
+    print("=" * 70)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

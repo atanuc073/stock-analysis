@@ -1,0 +1,384 @@
+"""Event-driven backtest engine.
+
+Replays the scoring + portfolio + exit logic on historical data, using only
+data available as of each rebalance date (no lookahead bias).
+
+Design:
+  - Reuses PositionFactory and ExitEvaluator unchanged (LSP/DIP)
+  - Uses an in-memory portfolio (no JSON I/O)
+  - Rebalances weekly by default — fast and matches position-investing horizon
+  - Costs: configurable bps per fill (default: 0.10% one-way)
+"""
+from __future__ import annotations
+import logging
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from typing import Optional
+
+import pandas as pd
+from tqdm import tqdm
+
+from portfolio.models import (
+    Position, ExitType, PositionStatus, Trade, TierLevel,
+)
+from portfolio.lifecycle import (
+    PositionFactory, ExitEvaluator, EntryParameters, ExitConfig,
+)
+
+from .data_loader import HistoricalData
+from .scoring import score_at, price_at, BacktestScore
+
+log = logging.getLogger(__name__)
+
+
+# ── Config ───────────────────────────────────────────────────────────────────
+@dataclass
+class BacktestConfig:
+    initial_capital: float = 1_000_000.0       # ₹10 lakh default
+    rebalance_freq_days: int = 5               # weekly
+    min_score: float = 70.0                    # buy threshold
+    max_positions: int = 12                    # concurrent open positions
+    base_position_weight: float = 0.10         # 10% of equity per new position
+    max_position_weight: float = 0.15
+    max_sector_weight: float = 0.30
+    transaction_cost_bps: float = 10.0         # 10 bps each side (0.10%)
+    slippage_bps: float = 5.0                  # 5 bps slippage
+    include_forecast: bool = False             # forecast slow; off by default
+
+    @property
+    def cost_per_side(self) -> float:
+        return (self.transaction_cost_bps + self.slippage_bps) / 10000.0
+
+
+# ── Trade record (extended for backtest reporting) ───────────────────────────
+@dataclass
+class BTTrade:
+    symbol: str
+    action: str             # BUY | SELL
+    qty: float
+    price: float
+    gross_value: float
+    cost: float
+    net_value: float
+    timestamp: str
+    sector: str = ""
+    market: str = ""
+    reason: str = ""
+    exit_type: Optional[str] = None
+    pnl_abs: float = 0.0
+    pnl_pct: float = 0.0
+    days_held: int = 0
+    score_at_entry: float = 0.0
+
+
+@dataclass
+class EquityPoint:
+    date: pd.Timestamp
+    cash: float
+    market_value: float
+    total: float
+    n_open: int
+
+
+@dataclass
+class BacktestResult:
+    config: BacktestConfig
+    equity_curve: list[EquityPoint] = field(default_factory=list)
+    trades: list[BTTrade] = field(default_factory=list)
+    final_positions: list[Position] = field(default_factory=list)
+    benchmark_curve: dict[str, list[tuple[pd.Timestamp, float]]] = field(default_factory=dict)
+    universe_size: int = 0
+    start: str = ""
+    end: str = ""
+
+
+# ── The engine ───────────────────────────────────────────────────────────────
+class BacktestEngine:
+    def __init__(
+        self,
+        data: dict[str, HistoricalData],
+        config: Optional[BacktestConfig] = None,
+        entry_params: Optional[EntryParameters] = None,
+        exit_cfg: Optional[ExitConfig] = None,
+    ):
+        self.data = data
+        self.cfg = config or BacktestConfig()
+        self.factory = PositionFactory(entry_params)
+        self.exit_eval = ExitEvaluator(exit_cfg)
+
+        # Simulation state
+        self.cash: float = self.cfg.initial_capital
+        self.positions: dict[str, Position] = {}
+        self.trades: list[BTTrade] = []
+        self.equity_curve: list[EquityPoint] = []
+
+    # ── Public API ───────────────────────────────────────────────────────────
+    def run(self, dates: pd.DatetimeIndex) -> BacktestResult:
+        if len(dates) == 0:
+            raise ValueError("No trading dates provided")
+
+        log.info("Backtest: %s → %s, %d days, %d symbols, capital ₹%s",
+                 dates[0].date(), dates[-1].date(), len(dates),
+                 len(self.data), f"{self.cfg.initial_capital:,.0f}")
+
+        rebalance_dates = set(dates[::self.cfg.rebalance_freq_days])
+        rebalance_dates.add(dates[-1])  # always close on last day
+
+        for asof in tqdm(dates, desc="Simulating"):
+            # 1) Update prices on all open positions, update peaks
+            current_prices = self._current_prices(asof)
+            for sym, pos in list(self.positions.items()):
+                cp = current_prices.get(sym)
+                if cp is not None:
+                    ExitEvaluator.update_peak(pos, cp)
+
+            # 2) Evaluate exits every day (tighter risk control)
+            self._process_exits(asof, current_prices, evaluate_thesis=False)
+
+            # 3) Rebalance entries weekly (or whatever cadence)
+            if asof in rebalance_dates:
+                self._rebalance(asof, current_prices)
+                # Re-process exits with thesis break (using updated scores)
+                self._process_exits(asof, current_prices, evaluate_thesis=True)
+
+            # 4) Record equity
+            mv = self._market_value(current_prices)
+            self.equity_curve.append(EquityPoint(
+                date=asof, cash=self.cash, market_value=mv,
+                total=self.cash + mv,
+                n_open=sum(1 for p in self.positions.values()
+                           if p.status != PositionStatus.CLOSED),
+            ))
+
+        # 5) Force close remaining positions at end
+        self._close_all(dates[-1], self._current_prices(dates[-1]),
+                        reason="END_OF_BACKTEST")
+
+        # Final equity point
+        final_prices = self._current_prices(dates[-1])
+        self.equity_curve.append(EquityPoint(
+            date=dates[-1], cash=self.cash,
+            market_value=self._market_value(final_prices),
+            total=self.cash + self._market_value(final_prices),
+            n_open=0,
+        ))
+
+        return BacktestResult(
+            config=self.cfg,
+            equity_curve=self.equity_curve,
+            trades=self.trades,
+            final_positions=list(self.positions.values()),
+            universe_size=len(self.data),
+            start=str(dates[0].date()),
+            end=str(dates[-1].date()),
+        )
+
+    # ── Internals ────────────────────────────────────────────────────────────
+    def _current_prices(self, asof: pd.Timestamp) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for sym, hd in self.data.items():
+            p = price_at(hd, asof)
+            if p is not None:
+                out[sym] = p
+        return out
+
+    def _market_value(self, prices: dict[str, float]) -> float:
+        return sum(
+            prices.get(p.symbol, p.entry_price) * p.qty_open
+            for p in self.positions.values()
+            if p.status != PositionStatus.CLOSED
+        )
+
+    # ── Entries ──────────────────────────────────────────────────────────────
+    def _rebalance(self, asof: pd.Timestamp, current_prices: dict[str, float]) -> None:
+        """Score universe, find candidates, open new positions."""
+        n_open = sum(1 for p in self.positions.values()
+                     if p.status != PositionStatus.CLOSED)
+        if n_open >= self.cfg.max_positions:
+            return
+
+        # Score every symbol with sufficient history
+        scores: list[BacktestScore] = []
+        for sym, hd in self.data.items():
+            if sym in self.positions and self.positions[sym].status != PositionStatus.CLOSED:
+                continue  # skip open positions
+            s = score_at(hd, asof, include_forecast=self.cfg.include_forecast)
+            if s and s.score >= self.cfg.min_score:
+                scores.append(s)
+        if not scores:
+            return
+        scores.sort(key=lambda s: s.score, reverse=True)
+
+        equity = self.cash + self._market_value(current_prices)
+        sector_weights = self._sector_weights(current_prices, equity)
+        market_weights = self._market_weights(current_prices, equity)
+
+        slots = self.cfg.max_positions - n_open
+        for s in scores:
+            if slots <= 0:
+                break
+            # Concentration checks
+            if sector_weights.get(s.sector, 0.0) >= self.cfg.max_sector_weight:
+                continue
+            if market_weights.get(s.market, 0.0) >= 0.70:
+                continue
+
+            # Volatility-adjusted sizing
+            base_w = self.cfg.base_position_weight
+            vol_adj = min(0.25 / max(s.annual_vol, 0.05), 1.5)
+            score_adj = min(s.score / 70.0, 1.3)
+            target_w = min(base_w * vol_adj * score_adj, self.cfg.max_position_weight)
+            target_rupees = equity * target_w
+
+            if target_rupees < equity * 0.02:    # too small to bother
+                continue
+            if target_rupees > self.cash * 0.95:  # not enough cash
+                target_rupees = self.cash * 0.95
+            if target_rupees < equity * 0.02:
+                continue
+
+            qty = target_rupees / s.price
+            if qty <= 0:
+                continue
+
+            self._open_position(s, qty, asof, equity)
+            # Update running weights so next iteration sees latest
+            current_prices[s.symbol] = s.price
+            equity = self.cash + self._market_value(current_prices)
+            sector_weights = self._sector_weights(current_prices, equity)
+            market_weights = self._market_weights(current_prices, equity)
+            slots -= 1
+
+    def _open_position(self, s: BacktestScore, qty: float,
+                       asof: pd.Timestamp, equity: float) -> None:
+        cost = s.price * qty * (1 + self.cfg.cost_per_side)
+        if cost > self.cash:
+            return
+        pos = self.factory.create(
+            symbol=s.symbol, qty=qty, entry_price=s.price,
+            atr=s.atr_value, sector=s.sector, market=s.market,
+            score=s.score, entry_date=asof.strftime("%Y-%m-%d"),
+        )
+        self.positions[s.symbol] = pos
+        self.cash -= cost
+        self.trades.append(BTTrade(
+            symbol=s.symbol, action="BUY", qty=qty, price=s.price,
+            gross_value=s.price * qty,
+            cost=cost - s.price * qty,
+            net_value=cost,
+            timestamp=asof.isoformat(),
+            sector=s.sector, market=s.market,
+            reason=f"score={s.score:.1f}",
+            score_at_entry=s.score,
+        ))
+
+    def _sector_weights(self, prices: dict[str, float], equity: float) -> dict[str, float]:
+        if equity <= 0:
+            return {}
+        out: dict[str, float] = {}
+        for p in self.positions.values():
+            if p.status == PositionStatus.CLOSED:
+                continue
+            mv = prices.get(p.symbol, p.entry_price) * p.qty_open
+            out[p.sector] = out.get(p.sector, 0.0) + mv / equity
+        return out
+
+    def _market_weights(self, prices: dict[str, float], equity: float) -> dict[str, float]:
+        if equity <= 0:
+            return {}
+        out: dict[str, float] = {}
+        for p in self.positions.values():
+            if p.status == PositionStatus.CLOSED:
+                continue
+            mv = prices.get(p.symbol, p.entry_price) * p.qty_open
+            out[p.market] = out.get(p.market, 0.0) + mv / equity
+        return out
+
+    # ── Exits ────────────────────────────────────────────────────────────────
+    def _process_exits(self, asof: pd.Timestamp, prices: dict[str, float],
+                       evaluate_thesis: bool) -> None:
+        for sym, pos in list(self.positions.items()):
+            if pos.status == PositionStatus.CLOSED:
+                continue
+            cp = prices.get(sym)
+            if cp is None:
+                continue
+
+            current_score: Optional[float] = None
+            if evaluate_thesis:
+                hd = self.data.get(sym)
+                if hd:
+                    s = score_at(hd, asof, include_forecast=False)
+                    if s:
+                        current_score = s.score
+
+            signals = self.exit_eval.evaluate(
+                pos, cp, current_score=current_score, red_flags=0,
+                today=asof.date(),
+            )
+            for sig in signals:
+                self._execute_exit(pos, sig, asof)
+
+    def _execute_exit(self, pos: Position, sig, asof: pd.Timestamp) -> None:
+        qty = min(sig.suggested_qty, pos.qty_open)
+        if qty <= 0:
+            return
+        gross = sig.current_price * qty
+        cost = gross * self.cfg.cost_per_side
+        net = gross - cost
+
+        pnl_abs = (sig.current_price - pos.entry_price) * qty
+        pnl_pct = (sig.current_price / pos.entry_price - 1) * 100
+        try:
+            entry_dt = date.fromisoformat(pos.entry_date)
+        except Exception:
+            entry_dt = asof.date()
+        days_held = (asof.date() - entry_dt).days
+
+        self.cash += net
+        pos.qty_open -= qty
+        pos.realized_pnl += pnl_abs
+
+        # Apply tier side-effects: mark triggered + bump stop
+        if sig.exit_type in (ExitType.TIER_1, ExitType.TIER_2):
+            tier_idx = 0 if sig.exit_type == ExitType.TIER_1 else 1
+            if tier_idx < len(pos.tiers):
+                t = pos.tiers[tier_idx]
+                t.triggered = True
+                t.triggered_on = asof.isoformat()
+                t.fill_price = sig.current_price
+            if sig.new_stop_price is not None:
+                pos.stop_price = sig.new_stop_price
+
+        # Status
+        if pos.qty_open <= 1e-6:
+            pos.status = PositionStatus.CLOSED
+        elif pos.qty_original > pos.qty_open:
+            pos.status = PositionStatus.PARTIALLY_CLOSED
+
+        self.trades.append(BTTrade(
+            symbol=pos.symbol, action="SELL", qty=qty, price=sig.current_price,
+            gross_value=gross, cost=cost, net_value=net,
+            timestamp=asof.isoformat(),
+            sector=pos.sector, market=pos.market,
+            reason=sig.reason,
+            exit_type=sig.exit_type.value,
+            pnl_abs=pnl_abs, pnl_pct=pnl_pct,
+            days_held=days_held,
+            score_at_entry=pos.score_at_entry,
+        ))
+
+    def _close_all(self, asof: pd.Timestamp, prices: dict[str, float], reason: str) -> None:
+        for sym, pos in list(self.positions.items()):
+            if pos.status == PositionStatus.CLOSED or pos.qty_open <= 0:
+                continue
+            cp = prices.get(sym, pos.entry_price)
+            from portfolio.models import ExitSignal
+            sig = ExitSignal(
+                symbol=sym, exit_type=ExitType.MANUAL,
+                suggested_qty=pos.qty_open, current_price=cp,
+                reason=reason,
+                pnl_pct=(cp / pos.entry_price - 1) * 100,
+                pnl_abs=(cp - pos.entry_price) * pos.qty_open,
+            )
+            self._execute_exit(pos, sig, asof)
