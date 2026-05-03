@@ -259,6 +259,12 @@ class BacktestEngine:
                 continue  # regime says: no new entries in this market
             s = score_at(hd, asof, include_forecast=self.cfg.include_forecast)
             if s and s.score >= self.cfg.min_score:
+                # Hard block: skip stocks extended >40% above 200DMA (late-cycle
+                # blow-off tops). The technical scorer already penalizes these
+                # but the score can still clear 65 via fundamentals/momentum.
+                ext = s.technical.get("pct_above_sma200", 0.0)
+                if ext > 40.0:
+                    continue
                 scores.append(s)
         if not scores:
             return

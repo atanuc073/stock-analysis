@@ -31,6 +31,8 @@ def compute(df: pd.DataFrame) -> dict:
     macd_cross_dn = bool(macd_line.iloc[last] < macd_sig.iloc[last] and macd_line.iloc[last - 1] >= macd_sig.iloc[last - 1])
     above_50 = price > float(sma50.iloc[last])
     above_200 = price > float(sma200.iloc[last])
+    sma200_val = float(sma200.iloc[last]) if not np.isnan(sma200.iloc[last]) else price
+    pct_above_sma200 = (price / sma200_val - 1) * 100 if sma200_val > 0 else 0.0
     golden_cross = bool(sma50.iloc[last] > sma200.iloc[last] and sma50.iloc[last - 1] <= sma200.iloc[last - 1])
     death_cross = bool(sma50.iloc[last] < sma200.iloc[last] and sma50.iloc[last - 1] >= sma200.iloc[last - 1])
     avg_vol_20 = float(vol.tail(20).mean()) if vol.tail(20).mean() else 1.0
@@ -102,6 +104,7 @@ def compute(df: pd.DataFrame) -> dict:
         "rsi": rsi_v,
         "above_sma50": above_50,
         "above_sma200": above_200,
+        "pct_above_sma200": pct_above_sma200,
         "high_52w": high_52w,
         "low_52w": low_52w,
         "pct_from_52w_high": pct_from_52w_high,
