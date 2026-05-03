@@ -100,17 +100,28 @@ class BacktestEngine:
         config: Optional[BacktestConfig] = None,
         entry_params: Optional[EntryParameters] = None,
         exit_cfg: Optional[ExitConfig] = None,
+        regime_data: Optional[dict[str, dict[str, pd.Series]]] = None,
     ):
+        """
+        regime_data: { 'IN': {'index': series, 'vix': series}, 'US': {...} }
+        Pass None to disable regime-aware sizing entirely.
+        """
         self.data = data
         self.cfg = config or BacktestConfig()
         self.factory = PositionFactory(entry_params)
         self.exit_eval = ExitEvaluator(exit_cfg)
+        self.regime_data = regime_data or {}
 
         # Simulation state
         self.cash: float = self.cfg.initial_capital
         self.positions: dict[str, Position] = {}
         self.trades: list[BTTrade] = []
         self.equity_curve: list[EquityPoint] = []
+
+        # Regime cache: avoid recomputing every rebalance
+        self._regime_cache: dict[tuple[pd.Timestamp, str], regime_mod.HistoricalRegime] = {}
+        self._last_regime_compute: Optional[pd.Timestamp] = None
+        self._current_regime: dict[str, regime_mod.HistoricalRegime] = {}
 
     # ── Public API ───────────────────────────────────────────────────────────
     def run(self, dates: pd.DatetimeIndex) -> BacktestResult:
@@ -189,9 +200,47 @@ class BacktestEngine:
             if p.status != PositionStatus.CLOSED
         )
 
+    # ── Regime helpers ───────────────────────────────────────────────────────
+    def _refresh_regime(self, asof: pd.Timestamp) -> None:
+        """Recompute regime per market if check window expired. Cheap."""
+        if not self.cfg.use_regime or not self.regime_data:
+            return
+        if (self._last_regime_compute is not None
+            and (asof - self._last_regime_compute).days < self.cfg.regime_check_freq_days):
+            return
+        for market, series in self.regime_data.items():
+            self._current_regime[market] = regime_mod.detect(
+                series.get("index", pd.Series(dtype=float)),
+                series.get("vix"),
+                asof,
+            )
+        self._last_regime_compute = asof
+
+    def _regime_multiplier(self, market: str) -> float:
+        if not self.cfg.use_regime:
+            return 1.0
+        r = self._current_regime.get(market)
+        return r.allocation_multiplier if r else 1.0
+
+    def _regime_blocks_entry(self, market: str) -> bool:
+        if not self.cfg.use_regime:
+            return False
+        r = self._current_regime.get(market)
+        if r is None:
+            return False
+        order = ["BEAR", "CAUTIOUS", "NEUTRAL", "NEUTRAL_BULL", "BULL"]
+        try:
+            cur = order.index(r.label)
+            floor = order.index(self.cfg.regime_skip_below)
+        except ValueError:
+            return False
+        return cur <= floor
+
     # ── Entries ──────────────────────────────────────────────────────────────
     def _rebalance(self, asof: pd.Timestamp, current_prices: dict[str, float]) -> None:
         """Score universe, find candidates, open new positions."""
+        self._refresh_regime(asof)
+
         n_open = sum(1 for p in self.positions.values()
                      if p.status != PositionStatus.CLOSED)
         if n_open >= self.cfg.max_positions:
@@ -202,6 +251,8 @@ class BacktestEngine:
         for sym, hd in self.data.items():
             if sym in self.positions and self.positions[sym].status != PositionStatus.CLOSED:
                 continue  # skip open positions
+            if self._regime_blocks_entry(hd.market):
+                continue  # regime says: no new entries in this market
             s = score_at(hd, asof, include_forecast=self.cfg.include_forecast)
             if s and s.score >= self.cfg.min_score:
                 scores.append(s)
@@ -223,11 +274,15 @@ class BacktestEngine:
             if market_weights.get(s.market, 0.0) >= 0.70:
                 continue
 
-            # Volatility-adjusted sizing
+            # Volatility-adjusted sizing × regime allocation multiplier
             base_w = self.cfg.base_position_weight
             vol_adj = min(0.25 / max(s.annual_vol, 0.05), 1.5)
             score_adj = min(s.score / 70.0, 1.3)
-            target_w = min(base_w * vol_adj * score_adj, self.cfg.max_position_weight)
+            regime_adj = self._regime_multiplier(s.market)
+            target_w = min(
+                base_w * vol_adj * score_adj * regime_adj,
+                self.cfg.max_position_weight,
+            )
             target_rupees = equity * target_w
 
             if target_rupees < equity * 0.02:    # too small to bother

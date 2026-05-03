@@ -22,6 +22,7 @@ from .data_loader import load_universe, trading_dates
 from .engine import BacktestConfig, BacktestEngine
 from .results import compute as compute_stats
 from .reporter import write_excel, write_markdown, write_chart
+from . import regime as regime_mod
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,6 +89,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="Concurrent fetches (default 4)")
     p.add_argument("--benchmark-india", default="^NSEI")
     p.add_argument("--benchmark-us", default="^GSPC")
+    p.add_argument("--no-regime", action="store_true",
+                   help="Disable regime-aware sizing (default: enabled)")
+    p.add_argument("--regime-skip-below", default="BEAR",
+                   choices=["BEAR", "CAUTIOUS", "NEUTRAL", "NEUTRAL_BULL", "BULL"],
+                   help="Skip new entries when regime label ≤ this (default BEAR)")
     args = p.parse_args(argv)
 
     output_dir = Path(args.output_dir) if args.output_dir else REPORTS_DIR / "backtest"
@@ -116,21 +122,44 @@ def main(argv: list[str] | None = None) -> int:
         min_score=args.threshold,
         max_positions=args.max_positions,
         include_forecast=args.include_forecast,
+        use_regime=not args.no_regime,
+        regime_skip_below=args.regime_skip_below,
     )
-    engine = BacktestEngine(data=data, config=cfg)
+
+    # Pre-load benchmarks (also used as regime input)
+    has_in = any(hd.is_indian for hd in data.values())
+    has_us = any(not hd.is_indian for hd in data.values())
+    bench_in = _load_benchmark(args.benchmark_india, args.start, args.end) if has_in else pd.Series(dtype=float)
+    bench_us = _load_benchmark(args.benchmark_us, args.start, args.end) if has_us else pd.Series(dtype=float)
+
+    regime_data: dict[str, dict[str, pd.Series]] = {}
+    if cfg.use_regime:
+        if has_in:
+            regime_data["IN"] = {
+                "index": bench_in,
+                "vix": regime_mod.load_benchmark("^INDIAVIX", args.start, args.end),
+            }
+        if has_us:
+            regime_data["US"] = {
+                "index": bench_us,
+                "vix": regime_mod.load_benchmark("^VIX", args.start, args.end),
+            }
+        log.info("Regime-aware sizing ENABLED (skip below: %s)", args.regime_skip_below)
+    else:
+        log.info("Regime-aware sizing DISABLED")
+
+    engine = BacktestEngine(data=data, config=cfg, regime_data=regime_data or None)
     result = engine.run(dates)
 
     # 4) Stats
     stats = compute_stats(result)
 
-    # 5) Benchmarks
+    # 5) Benchmarks for chart/report
     benchmarks: dict[str, pd.Series] = {}
-    has_in = any(hd.is_indian for hd in data.values())
-    has_us = any(not hd.is_indian for hd in data.values())
-    if has_in:
-        benchmarks["Nifty 50"] = _load_benchmark(args.benchmark_india, args.start, args.end)
-    if has_us:
-        benchmarks["S&P 500"] = _load_benchmark(args.benchmark_us, args.start, args.end)
+    if has_in and not bench_in.empty:
+        benchmarks["Nifty 50"] = bench_in
+    if has_us and not bench_us.empty:
+        benchmarks["S&P 500"] = bench_us
 
     # 6) Reports
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
