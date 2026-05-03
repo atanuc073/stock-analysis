@@ -242,12 +242,24 @@ class BacktestEngine:
 
     # ── Entries ──────────────────────────────────────────────────────────────
     def _rebalance(self, asof: pd.Timestamp, current_prices: dict[str, float]) -> None:
-        """Score universe, find candidates, open new positions."""
+        """Score universe, find candidates, open new positions.
+
+        Capital-driven (not slot-driven): keep deploying as long as cash is
+        idle (>5% of equity), up to a hard cap of 2x max_positions to prevent
+        fragmentation. This eliminates the cash drag where T1/T2 freed cash
+        sat idle until the full position closed.
+        """
         self._refresh_regime(asof)
 
+        equity = self.cash + self._market_value(current_prices)
+        cash_floor = equity * 0.05  # don't bother if <5% deployable
         n_open = sum(1 for p in self.positions.values()
                      if p.status != PositionStatus.CLOSED)
-        if n_open >= self.cfg.max_positions:
+        # Hard cap on fragmentation: never exceed 2x max_positions
+        hard_cap = self.cfg.max_positions * 2
+        if self.cash < cash_floor and n_open >= self.cfg.max_positions:
+            return
+        if n_open >= hard_cap:
             return
 
         # Score every symbol with sufficient history
@@ -274,9 +286,14 @@ class BacktestEngine:
         sector_weights = self._sector_weights(current_prices, equity)
         market_weights = self._market_weights(current_prices, equity)
 
-        slots = self.cfg.max_positions - n_open
+        # Slots = remaining capacity (up to hard_cap), driven by both
+        # position count AND idle cash. After a T1/T2 fires, n_open stays
+        # the same but cash rises — we still allow new entries via hard_cap.
+        slots = hard_cap - n_open
         for s in scores:
             if slots <= 0:
+                break
+            if self.cash <= cash_floor:
                 break
             # Concentration checks
             if sector_weights.get(s.sector, 0.0) >= self.cfg.max_sector_weight:
