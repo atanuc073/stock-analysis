@@ -116,8 +116,14 @@ def load_universe(symbols: list[str], start: str, end: str,
                   max_workers: int = 4) -> dict[str, HistoricalData]:
     """Load full history for a universe of symbols. Cached on disk."""
     out: dict[str, HistoricalData] = {}
+    
+    log.info("Loading %d symbols using %d workers (staggered)", len(symbols), max_workers)
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(_fetch_one, s, start, end): s for s in symbols}
+        futures = {}
+        for s in symbols:
+            futures[ex.submit(_fetch_one, s, start, end)] = s
+            time.sleep(0.15)  # Stagger to avoid Yahoo 429 Rate Limits
+            
         for fut in tqdm(as_completed(futures), total=len(futures), desc="Loading history"):
             sym = futures[fut]
             try:

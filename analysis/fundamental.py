@@ -3,19 +3,25 @@ from __future__ import annotations
 import numpy as np
 
 
+def _safe_float(val) -> float | None:
+    try:
+        return float(val) if val is not None else None
+    except (ValueError, TypeError):
+        return None
+
 def compute(info: dict) -> dict:
     if not info:
         return {"score": 50.0, "signals": [], "error": "no fundamentals"}
 
-    pe = info.get("trailingPE") or info.get("forwardPE")
-    pb = info.get("priceToBook")
-    roe = info.get("returnOnEquity")
-    de = info.get("debtToEquity")
-    eps_growth = info.get("earningsGrowth")
-    rev_growth = info.get("revenueGrowth")
-    margin = info.get("profitMargins")
-    div_yield = info.get("dividendYield")
-    market_cap = info.get("marketCap")
+    pe = _safe_float(info.get("trailingPE") or info.get("forwardPE"))
+    pb = _safe_float(info.get("priceToBook"))
+    roe = _safe_float(info.get("returnOnEquity"))
+    de = _safe_float(info.get("debtToEquity"))
+    eps_growth = _safe_float(info.get("earningsGrowth"))
+    rev_growth = _safe_float(info.get("revenueGrowth"))
+    margin = _safe_float(info.get("profitMargins"))
+    div_yield = _safe_float(info.get("dividendYield"))
+    market_cap = _safe_float(info.get("marketCap"))
 
     score = 50.0
     signals = []
