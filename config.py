@@ -15,7 +15,8 @@ CACHE_DIR.mkdir(exist_ok=True)
 # ── Runtime ──────────────────────────────────────────────────────────────────
 RUN_MODE = os.getenv("RUN_MODE", "watchlist").lower()  # "watchlist" | "broad"
 TOP_N = int(os.getenv("TOP_N", "15"))
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "2"))  # parallel ticker downloads — keep low to avoid Yahoo rate limits
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))  # parallel ticker downloads (8 = good speed/rate-limit balance)
+FETCH_DELAY_MS = int(os.getenv("FETCH_DELAY_MS", "200"))  # ms stagger per thread to avoid Yahoo 429s
 
 # ── Telegram ─────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")

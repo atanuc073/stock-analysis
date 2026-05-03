@@ -10,7 +10,7 @@ import pandas as pd
 import yfinance as yf
 from tqdm import tqdm
 
-from config import MAX_WORKERS
+from config import MAX_WORKERS, FETCH_DELAY_MS
 
 log = logging.getLogger(__name__)
 
@@ -84,9 +84,19 @@ def _fetch_one(symbol: str, period: str = "1y", max_retries: int = 4) -> TickerD
 
 
 def fetch_many(symbols: list[str], period: str = "1y", show_progress: bool = True) -> dict[str, TickerData]:
+    """Fetch ticker data in parallel with staggered submission to avoid rate limits."""
     results: dict[str, TickerData] = {}
+    delay_s = FETCH_DELAY_MS / 1000.0
+
+    log.info("Fetching %d tickers with %d workers (stagger %dms)", len(symbols), MAX_WORKERS, FETCH_DELAY_MS)
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {ex.submit(_fetch_one, s, period): s for s in symbols}
+        # Stagger submissions so threads don't all hit Yahoo at the same instant
+        futures = {}
+        for s in symbols:
+            futures[ex.submit(_fetch_one, s, period)] = s
+            time.sleep(delay_s)
+
         it = as_completed(futures)
         if show_progress:
             it = tqdm(it, total=len(futures), desc="Fetching")
@@ -98,3 +108,4 @@ def fetch_many(symbols: list[str], period: str = "1y", show_progress: bool = Tru
                 log.warning("fetch failed %s: %s", sym, e)
                 results[sym] = TickerData(symbol=sym, error=str(e))
     return results
+

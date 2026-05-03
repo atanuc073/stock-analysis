@@ -44,8 +44,8 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True) -> None:
     reports = [r for r in reports if r.composite_score > 0]
     log.info("Analysis complete: %d valid reports", len(reports))
 
-    md_path, json_path = write_reports(reports, top_n=top_n)
-    log.info("Wrote %s and %s", md_path, json_path)
+    md_path, json_path, xlsx_path = write_reports(reports, top_n=top_n)
+    log.info("Wrote %s, %s, and %s", md_path, json_path, xlsx_path)
 
     if send_tg:
         summary = telegram_summary(reports, top_n=min(top_n, 10))

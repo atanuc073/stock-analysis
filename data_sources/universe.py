@@ -11,7 +11,13 @@ log = logging.getLogger(__name__)
 def sp500_tickers() -> list[str]:
     """Scrape S&P 500 constituents from Wikipedia."""
     try:
-        tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+        import requests
+        from io import StringIO
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) StockAnalysis/1.0"}
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        tables = pd.read_html(StringIO(resp.text))
         df = tables[0]
         # Yahoo uses '-' instead of '.' (e.g., BRK.B -> BRK-B)
         return [s.replace(".", "-") for s in df["Symbol"].tolist()]
