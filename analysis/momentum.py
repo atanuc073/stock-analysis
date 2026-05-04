@@ -16,6 +16,7 @@ def compute(df: pd.DataFrame) -> dict:
         return {"score": 50.0, "signals": []}
     close = df["Close"]
     ret = lambda n: (close.iloc[-1] / close.iloc[-n] - 1) * 100 if len(close) >= n else None
+    r1 = ret(2)  # 1-day change uses prior close (index -2)
     r5 = ret(5); r21 = ret(21); r63 = ret(63); r126 = ret(126); r252 = ret(252)
 
     # 12-1 momentum: 12M return minus 1M return → long-term strength + recent pause
@@ -63,7 +64,7 @@ def compute(df: pd.DataFrame) -> dict:
     score = float(np.clip(score, 0, 100))
     return {
         "score": score, "signals": signals,
-        "ret_1w": r5, "ret_1m": r21, "ret_3m": r63,
+        "ret_1d": r1, "ret_1w": r5, "ret_1m": r21, "ret_3m": r63,
         "ret_6m": r126, "ret_1y": r252,
         "mom_12_1": mom_12_1, "mom_6_1": mom_6_1,
     }

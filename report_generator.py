@@ -40,14 +40,15 @@ def render_markdown(reports: list, top_n: int = 15) -> str:
 
     # Summary table
     lines.append("## Top Picks\n")
-    lines.append("| # | Ticker | Mkt | Name | Price | Score | Verdict | 1M | 3M | RSI | P/E | Sector |")
-    lines.append("|---|--------|-----|------|-------|-------|---------|------|------|-----|-----|--------|")
+    lines.append("| # | Ticker | Mkt | Name | Price | Score | Verdict | 1D | 1M | 3M | RSI | P/E | Sector |")
+    lines.append("|---|--------|-----|------|-------|-------|---------|------|------|------|-----|-----|--------|")
     for i, r in enumerate(top, 1):
         pe_val = r.fundamental.get('pe')
         pe_str = f"{pe_val:.1f}" if isinstance(pe_val, float) else (pe_val or '—')
         lines.append(
             f"| {i} | **{r.symbol}** | {r.market} | {(r.name or '')[:24]} | "
             f"{r.price:.2f} | **{r.composite_score:.1f}** | {r.verdict} | "
+            f"{_fmt_pct(r.momentum.get('ret_1d'))} | "
             f"{_fmt_pct(r.momentum.get('ret_1m'))} | {_fmt_pct(r.momentum.get('ret_3m'))} | "
             f"{r.technical.get('rsi', 0):.0f} | "
             f"{pe_str} | "
@@ -58,7 +59,7 @@ def render_markdown(reports: list, top_n: int = 15) -> str:
     for r in top:
         lines.append(f"### {r.symbol} — {r.name} ({r.market})  →  **{r.verdict}** (score {r.composite_score:.1f})\n")
         lines.append(f"- **Price:** {r.price:.2f}  |  **Sector:** {r.sector or '—'}  |  **Mkt Cap:** {_fmt_money(r.fundamental.get('market_cap'))}")
-        lines.append(f"- **Returns:** 1W {_fmt_pct(r.momentum.get('ret_1w'))}, 1M {_fmt_pct(r.momentum.get('ret_1m'))}, 3M {_fmt_pct(r.momentum.get('ret_3m'))}, 1Y {_fmt_pct(r.momentum.get('ret_1y'))}")
+        lines.append(f"- **Returns:** 1D {_fmt_pct(r.momentum.get('ret_1d'))}, 1W {_fmt_pct(r.momentum.get('ret_1w'))}, 1M {_fmt_pct(r.momentum.get('ret_1m'))}, 3M {_fmt_pct(r.momentum.get('ret_3m'))}, 1Y {_fmt_pct(r.momentum.get('ret_1y'))}")
         lines.append(f"- **Technical:** RSI {r.technical.get('rsi', 0):.1f} | Above 50DMA: {r.technical.get('above_sma50')} | Above 200DMA: {r.technical.get('above_sma200')} | {_fmt_pct(r.technical.get('pct_from_52w_high'), False)} from 52W high")
         f = r.fundamental
         lines.append(
@@ -167,7 +168,7 @@ def render_excel(reports: list, top_n: int = 15) -> Workbook:
     headers = [
         "#", "Ticker", "Market", "Name", "Sector", "Price",
         "Score", "Verdict", "RSI",
-        "1W %", "1M %", "3M %",
+        "1D %", "1W %", "1M %", "3M %",
         "P/E", "P/B", "ROE %", "D/E",
         "EPS Gr %", "Rev Gr %", "Div Yield %",
         "Forecast 21d %", "Signals",
@@ -189,6 +190,7 @@ def render_excel(reports: list, top_n: int = 15) -> Workbook:
             round(r.composite_score, 1),
             r.verdict,
             round(r.technical.get("rsi", 0), 1),
+            round(m.get("ret_1d") or 0, 2),
             round(m.get("ret_1w") or 0, 2),
             round(m.get("ret_1m") or 0, 2),
             round(m.get("ret_3m") or 0, 2),
@@ -233,7 +235,7 @@ def render_excel(reports: list, top_n: int = 15) -> Workbook:
         "Price", "Sector", "Mkt Cap",
         "RSI", "Above 50DMA", "Above 200DMA", "% from 52W High",
         "P/E", "P/B", "ROE %", "D/E", "EPS Gr %", "Rev Gr %", "Profit Margin %",
-        "1W %", "1M %", "3M %",
+        "1D %", "1W %", "1M %", "3M %",
         "Forecast 21d %", "Forecast Price",
         "Sentiment Avg", "Top Headline",
         "Signals",
@@ -270,6 +272,7 @@ def render_excel(reports: list, top_n: int = 15) -> Workbook:
             round((f.get("eps_growth") or 0) * 100, 1),
             round((f.get("revenue_growth") or 0) * 100, 1),
             round((f.get("profit_margin") or 0) * 100, 1),
+            round(m.get("ret_1d") or 0, 2),
             round(m.get("ret_1w") or 0, 2),
             round(m.get("ret_1m") or 0, 2),
             round(m.get("ret_3m") or 0, 2),
