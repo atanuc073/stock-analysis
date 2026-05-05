@@ -4,6 +4,8 @@ A research-driven, risk-managed daily investment system for **position investing
 
 > ⚠️ Analytical tool, **not investment advice**.
 
+📈 **NEW:** Live-test your strategy with **[Alpaca paper trading](PAPER_TRADING.md)** — $100k fake cash, real market data, zero risk.
+
 ---
 
 ## What's Inside

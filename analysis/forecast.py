@@ -23,12 +23,16 @@ def compute(df: pd.DataFrame, horizon_days: int = 21) -> dict:
         try:
             from analysis import forecast_timesfm
             result = forecast_timesfm.compute(df, horizon_days=horizon_days)
-            # If TimesFM unavailable/failed, fall through to linear
+            # If TimesFM unavailable/failed, fall through to prophet/linear
             if "error" not in result or result.get("score", 50.0) != 50.0:
                 return result
-            log.debug("TimesFM unavailable, falling back to linear")
+            log.debug("TimesFM unavailable, falling back to prophet")
         except Exception as e:
-            log.warning("TimesFM dispatch error: %s — falling back to linear", e)
+            log.warning("TimesFM dispatch error: %s — falling back to prophet", e)
+        try:
+            return _prophet_compute(df, horizon_days)
+        except Exception as e:
+            log.warning("Prophet failed: %s — falling back to linear", e)
     elif FORECASTER == "prophet":
         try:
             return _prophet_compute(df, horizon_days)

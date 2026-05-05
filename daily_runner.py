@@ -12,6 +12,7 @@ Pipeline:
 """
 from __future__ import annotations
 import argparse
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -257,7 +258,10 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True) -> None:
     md_path.write_text(md, encoding="utf-8")
     log.info("Wrote %s", md_path)
 
-    # 12) Telegram
+    # 12) Cache picks + exits for paper trader
+    _write_paper_cache(candidate_bundles, exit_signals)
+
+    # 13) Telegram
     if send_tg:
         tg = _render_telegram(
             regime, snap, exit_signals, flag_details, tax_advice, candidate_bundles,
@@ -267,6 +271,105 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True) -> None:
             log.info("Telegram OK")
 
     log.info("=== Done ===")
+
+
+# ── Paper-trading bridge ─────────────────────────────────────────────────────
+PAPER_CACHE = REPORTS_DIR / ".paper_signals.json"
+
+
+def _write_paper_cache(bundles: list, exit_signals: list) -> None:
+    """Persist today's approved picks + exit signals so paper_cli can replay them
+    without re-running the full pipeline (which is slow)."""
+    try:
+        approved = [b for b in bundles if b.approved]
+        payload = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "picks": [
+                {
+                    "symbol": b.candidate.symbol,
+                    "sector": b.candidate.sector,
+                    "market": b.candidate.market,
+                    "score": b.candidate.score,
+                    "price": b.candidate.price,
+                    "atr": b.candidate.atr,
+                    "annual_volatility": b.candidate.annual_volatility,
+                    "sizing_rupees": b.sizing_rupees,
+                }
+                for b in approved
+            ],
+            "exits": [
+                {
+                    "symbol": s.symbol,
+                    "exit_type": s.exit_type.value,
+                    "suggested_qty": s.suggested_qty,
+                    "current_price": s.current_price,
+                    "reason": s.reason,
+                    "new_stop_price": s.new_stop_price,
+                    "pnl_pct": s.pnl_pct,
+                    "pnl_abs": s.pnl_abs,
+                }
+                for s in exit_signals
+            ],
+        }
+        PAPER_CACHE.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        log.info("Cached %d picks + %d exits to %s",
+                 len(payload["picks"]), len(payload["exits"]), PAPER_CACHE)
+    except Exception as e:
+        log.warning("Failed to write paper cache: %s", e)
+
+
+def _generate_signals_for_paper_trading(svc=None, broker=None):
+    """Loader called by paper_cli — returns (picks, exit_signals).
+
+    Reads the cache written by run(). If stale (>24h) or missing, returns ([], []).
+    """
+    from risk.interfaces import TradeCandidate
+    from portfolio.models import ExitSignal, ExitType
+
+    if not PAPER_CACHE.exists():
+        log.warning("No paper-signals cache. Run: python daily_runner.py")
+        return [], []
+
+    try:
+        payload = json.loads(PAPER_CACHE.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.warning("Could not read paper cache: %s", e)
+        return [], []
+
+    # Stale check (24h)
+    try:
+        gen = datetime.fromisoformat(payload["generated_at"])
+        age_h = (datetime.now() - gen).total_seconds() / 3600
+        if age_h > 24:
+            log.warning("Paper-signals cache is %.1f h old. Re-run daily_runner.", age_h)
+    except Exception:
+        pass
+
+    picks = [
+        TradeCandidate(
+            symbol=p["symbol"], sector=p.get("sector", ""),
+            market=p.get("market", "US"), score=float(p["score"]),
+            price=float(p["price"]), atr=float(p.get("atr") or 0),
+            annual_volatility=float(p.get("annual_volatility") or 0),
+            rupees_intended=float(p.get("sizing_rupees") or 0),
+        )
+        for p in payload.get("picks", [])
+    ]
+
+    exit_signals = [
+        ExitSignal(
+            symbol=e["symbol"],
+            exit_type=ExitType(e["exit_type"]),
+            suggested_qty=float(e["suggested_qty"]),
+            current_price=float(e["current_price"]),
+            reason=e.get("reason", ""),
+            new_stop_price=e.get("new_stop_price"),
+            pnl_pct=float(e.get("pnl_pct") or 0),
+            pnl_abs=float(e.get("pnl_abs") or 0),
+        )
+        for e in payload.get("exits", [])
+    ]
+    return picks, exit_signals
 
 
 def _live_prices(symbols: list[str], cached: dict[str, TickerData]) -> dict[str, float]:

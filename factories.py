@@ -31,6 +31,12 @@ def build_portfolio_service(repo_path: Path | None = None) -> PortfolioService:
     return PortfolioService(repo, PositionFactory(), ExitEvaluator())
 
 
+def build_alpaca_broker():
+    """Lazy import so users without alpaca-py installed aren't penalized."""
+    from brokers.alpaca_broker import AlpacaBroker
+    return AlpacaBroker()
+
+
 def build_sizer() -> VolatilityAdjustedSizer:
     return VolatilityAdjustedSizer(SizerConfig())
 
