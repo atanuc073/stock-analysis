@@ -58,8 +58,8 @@ WATCHLIST = WATCHLIST_INDIA + WATCHLIST_US
 # boosted fundamental for value-momentum pairing.
 SCORE_WEIGHTS = {
     "technical": 0.20,
-    "fundamental": 0.35,
-    "momentum": 0.15,
+    "fundamental": 0.25,
+    "momentum": 0.25,
     "sentiment": 0.10,
     "forecast": 0.10,
     "options": 0.05,  # US only; auto-redistributed for IN tickers

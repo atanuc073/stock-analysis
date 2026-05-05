@@ -1,0 +1,6 @@
+.\.venv\Scripts\python.exe main.py --mode russell1000
+
+
+.\.venv\Scripts\python.exe -m backtest.cli --start 2022-01-01 --end 2025-01-01 --universe watchlist
+
+

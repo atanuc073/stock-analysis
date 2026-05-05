@@ -79,5 +79,6 @@ def russell1000_tickers() -> list[str]:
         return sp500_tickers()
 
 
+
 def broad_universe() -> list[str]:
     return nifty500_tickers() + sp500_tickers()
