@@ -41,5 +41,43 @@ def nifty500_tickers() -> list[str]:
         ]
 
 
+@lru_cache(maxsize=1)
+def russell1000_tickers() -> list[str]:
+    """Fetch Russell 1000 constituents from the iShares IWB ETF holdings CSV.
+
+    The file has ~9 metadata rows before the actual header. We auto-detect the
+    header row by looking for 'Ticker'. Yahoo-style symbols (e.g., BRK-B).
+    """
+    url = (
+        "https://www.ishares.com/us/products/239707/ishares-russell-1000-etf/"
+        "1467271812596.ajax?fileType=csv&fileName=IWB_holdings&dataType=fund"
+    )
+    try:
+        import requests
+        from io import StringIO
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) StockAnalysis/1.0"}
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        text = resp.text
+        # Locate the header row (starts with "Ticker,")
+        lines = text.splitlines()
+        header_idx = next(i for i, ln in enumerate(lines) if ln.startswith("Ticker,"))
+        df = pd.read_csv(StringIO("\n".join(lines[header_idx:])))
+        tickers = df["Ticker"].dropna().astype(str).str.strip().tolist()
+        # Filter out cash/derivative placeholders and clean dot-suffixed shares
+        out = []
+        for t in tickers:
+            if not t or t in {"-", "USD", "CASH"}:
+                continue
+            # Yahoo uses '-' instead of '.' for share-class tickers
+            out.append(t.replace(".", "-"))
+        if not out:
+            raise ValueError("no tickers parsed")
+        return out
+    except Exception as e:
+        log.warning("Russell 1000 fetch failed: %s — falling back to S&P 500", e)
+        return sp500_tickers()
+
+
 def broad_universe() -> list[str]:
     return nifty500_tickers() + sp500_tickers()

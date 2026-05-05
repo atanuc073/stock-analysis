@@ -22,7 +22,7 @@ from tqdm import tqdm
 import yfinance as yf
 
 from config import REPORTS_DIR, RUN_MODE, TOP_N, WATCHLIST
-from data_sources.universe import broad_universe
+from data_sources.universe import broad_universe, russell1000_tickers, sp500_tickers, nifty500_tickers
 from data_sources.yahoo import fetch_many, TickerData
 from analysis.composite import analyze
 from analysis.indicators import atr, annualized_volatility
@@ -147,7 +147,16 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True) -> None:
     gate = build_default_risk_gate()
 
     # 2) Universe + screening
-    universe = broad_universe() if mode == "broad" else WATCHLIST
+    if mode == "broad":
+        universe = broad_universe()
+    elif mode == "russell1000":
+        universe = russell1000_tickers()
+    elif mode == "sp500":
+        universe = sp500_tickers()
+    elif mode == "nifty500":
+        universe = nifty500_tickers()
+    else:
+        universe = WATCHLIST
     log.info("Universe: %d", len(universe))
     data = fetch_many(universe, period="1y")
     reports = []
@@ -618,7 +627,9 @@ def _render_telegram(regime, snap, exit_signals, flag_details, tax_advice, candi
 # ── Entry ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--mode", choices=["watchlist", "broad"], default=RUN_MODE)
+    p.add_argument("--mode",
+                   choices=["watchlist", "broad", "russell1000", "sp500", "nifty500"],
+                   default=RUN_MODE)
     p.add_argument("--top", type=int, default=TOP_N)
     p.add_argument("--no-telegram", action="store_true")
     args = p.parse_args()
