@@ -52,25 +52,46 @@ def russell1000_tickers() -> list[str]:
         "https://www.ishares.com/us/products/239707/ishares-russell-1000-etf/"
         "1467271812596.ajax?fileType=csv&fileName=IWB_holdings&dataType=fund"
     )
+    # iShares strips dots; Yahoo expects '-'. Map known dual-class tickers.
+    DUAL_CLASS = {
+        "BRKB": "BRK-B", "BFB": "BF-B", "BFA": "BF-A",
+        "GOOGL": "GOOGL", "GOOG": "GOOG",  # already correct
+        "HEIA": "HEINY",  # Heineken — Yahoo only has the ADR
+        "RDSA": "SHEL", "RDSB": "SHEL",
+    }
+    # BlackRock internal cash/derivative placeholders — not tradeable on Yahoo.
+    BLOCKLIST = {
+        "-", "USD", "CASH", "MARGIN", "MARGIN_USD",
+        "XTSLA",   # Tesla cash placeholder
+        "MMF",     # money-market fund
+    }
     try:
         import requests
         from io import StringIO
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) StockAnalysis/1.0"}
         resp = requests.get(url, headers=headers, timeout=20)
         resp.raise_for_status()
-        text = resp.text
-        # Locate the header row (starts with "Ticker,")
-        lines = text.splitlines()
+        lines = resp.text.splitlines()
         header_idx = next(i for i, ln in enumerate(lines) if ln.startswith("Ticker,"))
         df = pd.read_csv(StringIO("\n".join(lines[header_idx:])))
-        tickers = df["Ticker"].dropna().astype(str).str.strip().tolist()
-        # Filter out cash/derivative placeholders and clean dot-suffixed shares
-        out = []
-        for t in tickers:
-            if not t or t in {"-", "USD", "CASH"}:
+
+        # Some IWB rows include an "Asset Class" column we can use to keep equities only
+        if "Asset Class" in df.columns:
+            df = df[df["Asset Class"].astype(str).str.contains("Equity", case=False, na=False)]
+
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in df["Ticker"].dropna().astype(str):
+            t = raw.strip().upper()
+            if not t or t in BLOCKLIST:
                 continue
+            t = DUAL_CLASS.get(t, t)
             # Yahoo uses '-' instead of '.' for share-class tickers
-            out.append(t.replace(".", "-"))
+            t = t.replace(".", "-")
+            if t in seen:
+                continue
+            seen.add(t)
+            out.append(t)
         if not out:
             raise ValueError("no tickers parsed")
         return out
