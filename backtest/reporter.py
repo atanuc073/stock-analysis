@@ -7,7 +7,12 @@ import numpy as np
 import pandas as pd
 
 from .engine import BacktestResult
-from .results import PerformanceStats, yearly_breakdown, benchmark_buy_and_hold
+from .results import (
+    PerformanceStats,
+    yearly_breakdown,
+    benchmark_buy_and_hold,
+    score_calibration,
+)
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +102,9 @@ def write_excel(result: BacktestResult, stats: PerformanceStats,
             per_sym.to_excel(w, sheet_name="By_Symbol", index=False)
         if not exit_analysis.empty:
             exit_analysis.to_excel(w, sheet_name="By_Exit_Type", index=False)
+        calib = score_calibration(result)
+        if not calib.empty:
+            calib.to_excel(w, sheet_name="Score_Calibration", index=False)
         if not trades_df.empty:
             trades_df.to_excel(w, sheet_name="All_Trades", index=False)
 
@@ -200,6 +208,15 @@ def write_markdown(result: BacktestResult, stats: PerformanceStats, path: Path) 
         for t in sells_sorted[-10:]:
             L.append(f"| `{t.symbol}` | {t.market} | {t.timestamp[:10]} | "
                      f"₹{t.pnl_abs:+,.0f} ({t.pnl_pct:+.1f}%) | {t.days_held} | {t.exit_type} |")
+
+    # Score calibration — does score predict forward returns?
+    calib = score_calibration(result)
+    if not calib.empty:
+        L.append("\n## 🎯 Score Calibration (does the scorer actually predict returns?)\n")
+        L.append("If `AvgPnL_Pct` and `WinRate_Pct` increase monotonically with score "
+                 "bucket, the scorer is real signal. If flat, it's noise above the "
+                 "threshold — consider lowering `min_score` or re-weighting components.\n")
+        L.append(calib.to_markdown(index=False))
 
     # Verdict
     L.append("\n## 🎯 Verdict\n")

@@ -160,3 +160,47 @@ def benchmark_buy_and_hold(prices: pd.Series, capital: float) -> pd.Series:
         return pd.Series(dtype=float)
     p0 = prices.iloc[0]
     return capital * (prices / p0)
+
+
+def score_calibration(result: BacktestResult,
+                      bin_edges: list[float] | None = None) -> pd.DataFrame:
+    """Bin closed trades by ``score_at_entry`` and report forward-return stats.
+
+    Tells you whether the scorer is actually predictive — i.e. do trades that
+    enter with score 80+ realize better returns than those entering at 70-75?
+    A monotonic curve = scorer is signal. A flat curve = scorer is noise above
+    the threshold.
+    """
+    sells = [t for t in result.trades
+             if t.action == "SELL" and t.score_at_entry > 0]
+    if not sells:
+        return pd.DataFrame()
+
+    if bin_edges is None:
+        bin_edges = [0, 60, 65, 70, 75, 80, 85, 100]
+
+    df = pd.DataFrame([
+        {"score": t.score_at_entry, "pnl_pct": t.pnl_pct,
+         "pnl_abs": t.pnl_abs, "days": t.days_held,
+         "exit": t.exit_type or ""}
+        for t in sells
+    ])
+    df["bucket"] = pd.cut(df["score"], bins=bin_edges, include_lowest=True,
+                          right=False)
+
+    grp = df.groupby("bucket", observed=True).agg(
+        Trades=("pnl_pct", "count"),
+        AvgPnL_Pct=("pnl_pct", "mean"),
+        MedianPnL_Pct=("pnl_pct", "median"),
+        WinRate_Pct=("pnl_pct", lambda s: (s > 0).mean() * 100),
+        AvgDaysHeld=("days", "mean"),
+        TotalPnL=("pnl_abs", "sum"),
+    ).round(2).reset_index()
+    grp = grp.rename(columns={"bucket": "Score_Bucket"})
+    grp["Score_Bucket"] = grp["Score_Bucket"].astype(str)
+
+    # Annualized return per bucket (avg pnl% scaled by (365/avg holding))
+    grp["AnnualizedRet_Pct"] = (
+        grp["AvgPnL_Pct"] * (365.0 / grp["AvgDaysHeld"].replace(0, 1))
+    ).round(2)
+    return grp

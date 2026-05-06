@@ -85,8 +85,8 @@ def cmd_add(args) -> None:
     print(f"✅ Added {sym}")
     print(f"   Qty: {pos.qty_open}  Entry: {price:.2f}  ATR: {atr14:.2f}")
     print(f"   Stop: {pos.stop_price:.2f} ({(pos.stop_price/price-1)*100:+.1f}%)")
-    print(f"   T1 (+20%): {price*1.20:.2f}  →  sell 33%, stop→BE")
-    print(f"   T2 (+35%): {price*1.35:.2f}  →  sell 33%, stop→+15%")
+    print(f"   T1 (+22%): {price*1.22:.2f}  →  sell 33%, stop→BE")
+    print(f"   T2 (+38%): {price*1.38:.2f}  →  sell 33%, stop→+18%")
     print(f"   Sector: {sector or 'unknown'}  Market: {market}")
 
 

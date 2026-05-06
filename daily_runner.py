@@ -500,16 +500,24 @@ def _render_markdown(regime, sector_lookup, snap, state, prices,
     if not approved:
         L.append("_No candidates passed all risk checks today._\n")
     else:
-        L.append("| Symbol | Mkt | Sector | Score | Price | Stop | T1 (+20%) | T2 (+35%) | 30d Fcst | 60d Fcst | Suggested ₹ | Weight |")
+        L.append("| Symbol | Mkt | Sector | Score | Price | Stop | T1 (+22%) | T2 (+38%) | 30d Fcst | 60d Fcst | Suggested ₹ | Weight |")
         L.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
         for b in approved:
             c = b.candidate
-            stop = c.price - 2.5 * c.atr
-            stop = max(stop, c.price * 0.88)
+            # Vol-tiered ATR stop: give volatile stocks more breathing room
+            vol = getattr(c, "annual_vol", 0.30) or 0.30
+            if vol < 0.25:        # large cap / low vol
+                atr_mult, hard_floor = 2.5, 0.90
+            elif vol < 0.40:      # mid vol
+                atr_mult, hard_floor = 3.0, 0.85
+            else:                  # small cap / high vol
+                atr_mult, hard_floor = 3.5, 0.82
+            stop = c.price - atr_mult * c.atr
+            stop = max(stop, c.price * hard_floor)
             f30 = _fmt_horizon(b.forecasts, 30)
             f60 = _fmt_horizon(b.forecasts, 60)
             L.append(f"| `{c.symbol}` | {c.market} | {c.sector[:14]} | {c.score:.0f} | {c.price:.2f} "
-                     f"| {stop:.2f} | {c.price*1.20:.2f} | {c.price*1.35:.2f} "
+                     f"| {stop:.2f} | {c.price*1.22:.2f} | {c.price*1.38:.2f} "
                      f"| {f30} | {f60} "
                      f"| {b.sizing_rupees:,.0f} | {b.weight_pct:.1f}% |")
 
@@ -617,7 +625,7 @@ def _render_telegram(regime, snap, exit_signals, flag_details, tax_advice, candi
             f30 = _fmt_horizon(b.forecasts, 30)
             f60 = _fmt_horizon(b.forecasts, 60)
             L.append(f"{flag} `{c.symbol}` ({c.score:.0f}) — {b.weight_pct:.1f}% (₹{b.sizing_rupees:,.0f})")
-            L.append(f"   T1 {c.price*1.20:.0f}  Stop {max(c.price - 2.5*c.atr, c.price*0.88):.0f}  | 30d {f30}  60d {f60}")
+            L.append(f"   T1 {c.price*1.22:.0f}  Stop {max(c.price - 3.0*c.atr, c.price*0.85):.0f}  | 30d {f30}  60d {f60}")
         L.append("")
 
     L.append("_⚠️ Not investment advice._")

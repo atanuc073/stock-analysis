@@ -8,7 +8,7 @@ from typing import Optional
 
 class ExitType(str, Enum):
     STOP_LOSS = "STOP_LOSS"
-    TIER_1 = "TIER_1"            # +20% — sell 33%, move stop to BE
+    TIER_1 = "TIER_1"            # +22% — sell 33%, move stop to BE
     TIER_2 = "TIER_2"            # +35% — sell 33%, move stop to +15%
     TRAILING = "TRAILING"        # remainder trailing stop hit
     TIME_STOP = "TIME_STOP"      # 12 months no progress

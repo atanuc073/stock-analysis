@@ -45,10 +45,10 @@ def _row(r: StockReport, td) -> dict:
     t2 = None
     if price > 0:
         atr_stop = price - 2.5 * a if a else None
-        hard_stop = price * 0.88
+        hard_stop = price * 0.85
         stop = max(atr_stop, hard_stop) if atr_stop else hard_stop
-        t1 = price * 1.20
-        t2 = price * 1.35
+        t1 = price * 1.22
+        t2 = price * 1.38
 
     f = r.fundamental
     m = r.momentum
