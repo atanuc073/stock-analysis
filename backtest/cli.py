@@ -93,6 +93,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="Concurrent fetches (default 4)")
     p.add_argument("--benchmark-india", default="^NSEI")
     p.add_argument("--benchmark-us", default="^GSPC")
+    p.add_argument("--benchmark-india-broad", default="^CRSLDX",
+                   help="Broad IN benchmark (default Nifty 500: ^CRSLDX)")
+    p.add_argument("--benchmark-us-small", default="^RUT",
+                   help="US smallcap benchmark (default Russell 2000: ^RUT)")
     p.add_argument("--no-regime", action="store_true",
                    help="Disable regime-aware sizing (default: enabled)")
     p.add_argument("--regime-skip-below", default="BEAR",
@@ -136,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
     has_us = any(not hd.is_indian for hd in data.values())
     bench_in = _load_benchmark(args.benchmark_india, args.start, args.end) if has_in else pd.Series(dtype=float)
     bench_us = _load_benchmark(args.benchmark_us, args.start, args.end) if has_us else pd.Series(dtype=float)
+    bench_in_broad = _load_benchmark(args.benchmark_india_broad, args.start, args.end) if has_in else pd.Series(dtype=float)
+    bench_us_small = _load_benchmark(args.benchmark_us_small, args.start, args.end) if has_us else pd.Series(dtype=float)
 
     regime_data: dict[str, dict[str, pd.Series]] = {}
     if cfg.use_regime:
@@ -163,8 +169,12 @@ def main(argv: list[str] | None = None) -> int:
     benchmarks: dict[str, pd.Series] = {}
     if has_in and not bench_in.empty:
         benchmarks["Nifty 50"] = bench_in
+    if has_in and not bench_in_broad.empty:
+        benchmarks["Nifty 500"] = bench_in_broad
     if has_us and not bench_us.empty:
         benchmarks["S&P 500"] = bench_us
+    if has_us and not bench_us_small.empty:
+        benchmarks["Russell 2000"] = bench_us_small
 
     # 6) Reports
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
