@@ -47,11 +47,21 @@ def _slice(hd: HistoricalData, asof: pd.Timestamp) -> pd.DataFrame:
 
 
 def score_at(hd: HistoricalData, asof: pd.Timestamp,
-             include_forecast: bool = False) -> Optional[BacktestScore]:
+             include_forecast: bool = False,
+             live_weights: bool = True) -> Optional[BacktestScore]:
     """Compute composite score using only data <= asof.
 
     Set include_forecast=False to skip the forecast component (faster, and the
     linear/prophet forecasters add little value at backtest scale).
+
+    When ``live_weights=True`` (default), use the exact same weight scheme as
+    the live scorer in ``config.SCORE_WEIGHTS`` and treat unavailable
+    components (sentiment / options / optionally forecast) as neutral 50.
+    This matches the live composite behavior — components with no signal
+    contribute 50 × weight rather than being redistributed to drivers.
+
+    When ``live_weights=False`` (legacy), drop unavailable components and
+    redistribute their weight to technical (60%) and momentum (40%).
     """
     hist = _slice(hd, asof)
     if len(hist) < 60:
@@ -64,23 +74,38 @@ def score_at(hd: HistoricalData, asof: pd.Timestamp,
     mom = momentum.compute(hist)
     fcst = forecast.compute(hist) if include_forecast else {"score": 50.0, "signals": []}
 
-    # Reweight: drop sentiment + options components, redistribute to technical/momentum
-    # Original weights sum to 1.0 across {technical, fundamental, momentum, sentiment, forecast, options}
     w = dict(SCORE_WEIGHTS)
-    dropped = w.pop("sentiment", 0) + w.pop("options", 0)
-    if not include_forecast:
-        dropped += w.pop("forecast", 0)
-    # spread dropped weight to technical (60%) and momentum (40%)
-    w["technical"] = w.get("technical", 0) + dropped * 0.6
-    w["momentum"] = w.get("momentum", 0) + dropped * 0.4
+    # 'valuation' is a meta-bonus folded into fundamental in the live scorer;
+    # absorb it here so weights line up with the four core sub-scores.
+    valuation_w = w.pop("valuation", 0.0)
+    w["fundamental"] = w.get("fundamental", 0.0) + valuation_w
 
-    parts = {
-        "technical": tech.get("score", 50),
-        "fundamental": fund.get("score", 50),
-        "momentum": mom.get("score", 50),
-    }
-    if include_forecast:
-        parts["forecast"] = fcst.get("score", 50)
+    if live_weights:
+        # Live-equivalent: keep all weights, neutral 50 for missing components.
+        parts = {
+            "technical": tech.get("score", 50),
+            "fundamental": fund.get("score", 50),
+            "momentum": mom.get("score", 50),
+            "sentiment": 50.0,                                  # no historical news
+            "options": 50.0,                                    # no historical options
+            "forecast": fcst.get("score", 50) if include_forecast else 50.0,
+        }
+    else:
+        # Legacy behavior: drop missing components, redistribute their weight
+        # to technical (60%) and momentum (40%).
+        dropped = w.pop("sentiment", 0) + w.pop("options", 0)
+        if not include_forecast:
+            dropped += w.pop("forecast", 0)
+        w["technical"] = w.get("technical", 0) + dropped * 0.6
+        w["momentum"] = w.get("momentum", 0) + dropped * 0.4
+
+        parts = {
+            "technical": tech.get("score", 50),
+            "fundamental": fund.get("score", 50),
+            "momentum": mom.get("score", 50),
+        }
+        if include_forecast:
+            parts["forecast"] = fcst.get("score", 50)
 
     composite = sum(parts[k] * w.get(k, 0) for k in parts)
 

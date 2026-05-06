@@ -45,6 +45,7 @@ class BacktestConfig:
     transaction_cost_bps: float = 10.0         # 10 bps each side (0.10%)
     slippage_bps: float = 5.0                  # 5 bps slippage
     include_forecast: bool = False             # forecast slow; off by default
+    live_weights: bool = True                   # use live SCORE_WEIGHTS (no redistribution)
     use_regime: bool = True                     # enable market regime filter
     regime_skip_below: str = "BEAR"            # skip entries at or below this regime
     regime_check_freq_days: int = 5            # re-evaluate regime every N days
@@ -269,7 +270,9 @@ class BacktestEngine:
                 continue  # skip open positions
             if self._regime_blocks_entry(hd.market):
                 continue  # regime says: no new entries in this market
-            s = score_at(hd, asof, include_forecast=self.cfg.include_forecast)
+            s = score_at(hd, asof,
+                         include_forecast=self.cfg.include_forecast,
+                         live_weights=self.cfg.live_weights)
             if s and s.score >= self.cfg.min_score:
                 # Hard block: skip stocks extended >40% above 200DMA (late-cycle
                 # blow-off tops). The technical scorer already penalizes these
@@ -390,7 +393,9 @@ class BacktestEngine:
             if evaluate_thesis:
                 hd = self.data.get(sym)
                 if hd:
-                    s = score_at(hd, asof, include_forecast=False)
+                    s = score_at(hd, asof,
+                                 include_forecast=False,
+                                 live_weights=self.cfg.live_weights)
                     if s:
                         current_score = s.score
 

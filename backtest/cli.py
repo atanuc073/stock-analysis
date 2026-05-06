@@ -83,6 +83,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-positions", type=int, default=12)
     p.add_argument("--include-forecast", action="store_true",
                    help="Include forecast component (slower)")
+    p.add_argument("--legacy-weights", action="store_true",
+                   help="Use legacy weight redistribution (drop sentiment/options/forecast "
+                        "and reallocate to technical+momentum). Default is live-equivalent "
+                        "weights with neutral 50 for missing components.")
     p.add_argument("--output-dir", default=None,
                    help="Output directory (default reports/backtest/)")
     p.add_argument("--max-workers", type=int, default=4,
@@ -122,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
         min_score=args.threshold,
         max_positions=args.max_positions,
         include_forecast=args.include_forecast,
+        live_weights=not args.legacy_weights,
         use_regime=not args.no_regime,
         regime_skip_below=args.regime_skip_below,
     )
