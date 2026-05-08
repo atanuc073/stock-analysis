@@ -49,6 +49,7 @@ class BacktestConfig:
     use_regime: bool = True                     # enable market regime filter
     regime_skip_below: str = "BEAR"            # skip entries at or below this regime
     regime_check_freq_days: int = 5            # re-evaluate regime every N days
+    weights: Optional[dict] = None              # per-run override of SCORE_WEIGHTS (None = use config)
 
     @property
     def cost_per_side(self) -> float:
@@ -272,7 +273,8 @@ class BacktestEngine:
                 continue  # regime says: no new entries in this market
             s = score_at(hd, asof,
                          include_forecast=self.cfg.include_forecast,
-                         live_weights=self.cfg.live_weights)
+                         live_weights=self.cfg.live_weights,
+                         weights_override=self.cfg.weights)
             if s is None:
                 continue
             # Hard block: skip stocks extended >40% above 200DMA (late-cycle
@@ -414,7 +416,8 @@ class BacktestEngine:
                 if hd:
                     s = score_at(hd, asof,
                                  include_forecast=False,
-                                 live_weights=self.cfg.live_weights)
+                                 live_weights=self.cfg.live_weights,
+                                 weights_override=self.cfg.weights)
                     if s:
                         # Use raw composite for thesis-break (cross-sectional
                         # context is unavailable for a single ticker on exit).

@@ -58,7 +58,8 @@ def _slice(hd: HistoricalData, asof: pd.Timestamp) -> pd.DataFrame:
 
 def score_at(hd: HistoricalData, asof: pd.Timestamp,
              include_forecast: bool = False,
-             live_weights: bool = True) -> Optional[BacktestScore]:
+             live_weights: bool = True,
+             weights_override: Optional[dict] = None) -> Optional[BacktestScore]:
     """Compute composite score using only data <= asof.
 
     Set include_forecast=False to skip the forecast component (faster, and the
@@ -86,7 +87,7 @@ def score_at(hd: HistoricalData, asof: pd.Timestamp,
     qual = quality.compute(info)
     edrift = earnings_drift.compute(hist, info)
 
-    w = dict(SCORE_WEIGHTS)
+    w = dict(weights_override) if weights_override else dict(SCORE_WEIGHTS)
     # 'valuation' is sector-relative (cross-sectional) and unavailable in
     # per-ticker backtest scoring — drop it and renormalize via fundamental.
     valuation_w = w.pop("valuation", 0.0)
