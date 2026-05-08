@@ -93,17 +93,24 @@ def score_at(hd: HistoricalData, asof: pd.Timestamp,
     w["fundamental"] = w.get("fundamental", 0.0) + valuation_w
 
     if live_weights:
-        # Live-equivalent: keep all weights, neutral 50 for missing components.
+        # Live-equivalent weights, but DROP components that have no historical
+        # equivalent (sentiment from news, options flow). Anchoring them at
+        # neutral 50 systematically depresses backtest composites by ~6 points
+        # vs. live and prevents stocks from clearing the buy threshold.
+        # Renormalization happens below via total_w.
+        w.pop("sentiment", None)
+        w.pop("options", None)
+        if not include_forecast:
+            w.pop("forecast", None)
         parts = {
             "technical":      tech.get("score", 50),
             "fundamental":    fund.get("score", 50),
             "momentum":       mom.get("score", 50),
-            "sentiment":      50.0,                                  # no historical news
-            "options":        50.0,                                  # no historical options
-            "forecast":       fcst.get("score", 50) if include_forecast else 50.0,
             "quality":        qual.get("score", 50),
             "earnings_drift": edrift.get("score", 50),
         }
+        if include_forecast:
+            parts["forecast"] = fcst.get("score", 50)
     else:
         # Legacy behavior: drop missing components, redistribute their weight
         # to technical (60%) and momentum (40%).
