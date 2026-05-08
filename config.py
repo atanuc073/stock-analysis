@@ -65,16 +65,22 @@ WATCHLIST = WATCHLIST_INDIA + WATCHLIST_US
 # score applied via the cross-sectional post-processor — no longer folded
 # into fundamental.
 SCORE_WEIGHTS = {
-    "technical":      0.12,
-    "fundamental":    0.10,
-    "momentum":       0.22,
-    "sentiment":      0.03,
-    "forecast":       0.03,
-    "options":        0.05,
-    "quality":        0.18,   # promoted
-    "earnings_drift": 0.12,   # promoted — strongest non-momentum anomaly
-    "valuation":      0.00,   # handled cross-sectionally only
+    "technical":      0.13,
+    "fundamental":    0.12,
+    "momentum":       0.25,
+    "sentiment":      0.04,
+    "forecast":       0.04,
+    "options":        0.05,   # US only; auto-redistributed for IN tickers
+    "quality":        0.20,   # promoted — Novy-Marx GPA, FCF, accruals
+    "earnings_drift": 0.17,   # promoted — strongest non-momentum anomaly
+    "valuation":      0.00,   # handled cross-sectionally (post-processor)
 }
+# Sanity check at import: weights MUST sum to 1.0 or backtest composites
+# come out scaled (e.g. sum=0.85 → top scores ~68 instead of 80, blowing
+# past the 70 buy threshold and producing zero trades).
+assert abs(sum(SCORE_WEIGHTS.values()) - 1.0) < 1e-6, (
+    f"SCORE_WEIGHTS must sum to 1.0, got {sum(SCORE_WEIGHTS.values())}"
+)
 # ── Technical thresholds ─────────────────────────────────────────────────────
 RSI_OVERSOLD = 35
 RSI_OVERBOUGHT = 70

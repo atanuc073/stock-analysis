@@ -123,7 +123,14 @@ def score_at(hd: HistoricalData, asof: pd.Timestamp,
         if include_forecast:
             parts["forecast"] = fcst.get("score", 50)
 
-    composite = sum(parts[k] * w.get(k, 0) for k in parts)
+    # Renormalize so composite is on [0,100] regardless of whether weights
+    # sum exactly to 1.0. Defensive: prevents silent scaling bugs when
+    # SCORE_WEIGHTS is edited and the sum drifts off 1.0.
+    total_w = sum(w.get(k, 0) for k in parts)
+    if total_w > 0:
+        composite = sum(parts[k] * w.get(k, 0) for k in parts) / total_w
+    else:
+        composite = 50.0
 
     price = float(hist["Close"].iloc[-1])
     return BacktestScore(
