@@ -77,14 +77,18 @@ def apply(reports: Iterable) -> list:
     # ── 1. Sector-relative valuation ──────────────────────────────────
     by_sector_pe: dict[str, list[float]] = {}
     by_sector_pb: dict[str, list[float]] = {}
+    by_sector_ev: dict[str, list[float]] = {}
     for r in reps:
         sec = (r.sector or "Unknown") + "|" + (r.market or "")
         pe = (r.fundamental or {}).get("pe")
         pb = (r.fundamental or {}).get("pb")
+        ev = (r.fundamental or {}).get("ev_ebitda")
         if pe is not None and pe > 0:
             by_sector_pe.setdefault(sec, []).append(pe)
         if pb is not None and pb > 0:
             by_sector_pb.setdefault(sec, []).append(pb)
+        if ev is not None and ev > 0:
+            by_sector_ev.setdefault(sec, []).append(ev)
 
     # ── 2. Cross-sectional component arrays for z-scores ─────────────
     mom_arr = np.array([(r.momentum or {}).get("score", 50.0) for r in reps])
@@ -96,15 +100,19 @@ def apply(reports: Iterable) -> list:
         sec = (r.sector or "Unknown") + "|" + (r.market or "")
         pe = (r.fundamental or {}).get("pe")
         pb = (r.fundamental or {}).get("pb")
+        ev = (r.fundamental or {}).get("ev_ebitda")
         peers_pe = by_sector_pe.get(sec, [])
         peers_pb = by_sector_pb.get(sec, [])
+        peers_ev = by_sector_ev.get(sec, [])
 
-        # Sector-relative P/E (60%) + P/B (40%)
+        # Sector-relative valuation: P/E 50%% + P/B 25%% + EV/EBITDA 25%%
         pe_pct = _percentile_score(pe, peers_pe, invert=True)
         pb_pct = _percentile_score(pb, peers_pb, invert=True)
+        ev_pct = _percentile_score(ev, peers_ev, invert=True)
         components = []
-        if pe_pct is not None: components.append((pe_pct, 0.6))
-        if pb_pct is not None: components.append((pb_pct, 0.4))
+        if pe_pct is not None: components.append((pe_pct, 0.50))
+        if pb_pct is not None: components.append((pb_pct, 0.25))
+        if ev_pct is not None: components.append((ev_pct, 0.25))
         if components:
             sec_val_score = sum(s * w for s, w in components) / sum(w for _, w in components)
         else:
@@ -163,14 +171,18 @@ def apply_to_bt(scores: Iterable) -> list:
 
     by_sector_pe: dict[str, list[float]] = {}
     by_sector_pb: dict[str, list[float]] = {}
+    by_sector_ev: dict[str, list[float]] = {}
     for s in bts:
         sec = (s.sector or "Unknown") + "|" + (s.market or "")
         pe = (s.fundamental or {}).get("pe")
         pb = (s.fundamental or {}).get("pb")
+        ev = (s.fundamental or {}).get("ev_ebitda")
         if pe is not None and pe > 0:
             by_sector_pe.setdefault(sec, []).append(pe)
         if pb is not None and pb > 0:
             by_sector_pb.setdefault(sec, []).append(pb)
+        if ev is not None and ev > 0:
+            by_sector_ev.setdefault(sec, []).append(ev)
 
     mom_arr = np.array([(s.momentum or {}).get("score", 50.0) for s in bts])
     qual_arr = np.array([(s.quality or {}).get("score", 50.0) for s in bts])
@@ -179,14 +191,18 @@ def apply_to_bt(scores: Iterable) -> list:
         sec = (s.sector or "Unknown") + "|" + (s.market or "")
         pe = (s.fundamental or {}).get("pe")
         pb = (s.fundamental or {}).get("pb")
+        ev = (s.fundamental or {}).get("ev_ebitda")
         peers_pe = by_sector_pe.get(sec, [])
         peers_pb = by_sector_pb.get(sec, [])
+        peers_ev = by_sector_ev.get(sec, [])
 
         pe_pct = _percentile_score(pe, peers_pe, invert=True)
         pb_pct = _percentile_score(pb, peers_pb, invert=True)
+        ev_pct = _percentile_score(ev, peers_ev, invert=True)
         components = []
-        if pe_pct is not None: components.append((pe_pct, 0.6))
-        if pb_pct is not None: components.append((pb_pct, 0.4))
+        if pe_pct is not None: components.append((pe_pct, 0.50))
+        if pb_pct is not None: components.append((pb_pct, 0.25))
+        if ev_pct is not None: components.append((ev_pct, 0.25))
         sec_val_score = (
             sum(sc * w for sc, w in components) / sum(w for _, w in components)
             if components else 50.0

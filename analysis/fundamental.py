@@ -53,6 +53,7 @@ def compute(info: dict) -> dict:
 
     pe = _safe_float(info.get("trailingPE") or info.get("forwardPE"))
     pb = _safe_float(info.get("priceToBook"))
+    ev_ebitda = _safe_float(info.get("enterpriseToEbitda"))
     roe = _safe_float(info.get("returnOnEquity"))
     de = _safe_float(info.get("debtToEquity"))
     eps_growth = _safe_float(info.get("earningsGrowth"))
@@ -80,7 +81,16 @@ def compute(info: dict) -> dict:
         score += pb_pts
         if pb < 2:
             signals.append(f"Low P/B ({pb:.2f})")
-
+    # ── Smooth EV/EBITDA score (lower better) ────────────────
+    # Cleanest valuation metric: capital-structure neutral, D&A neutral.
+    # Cheap <8 → +6, fair ~12 → 0, expensive >18 → -6.
+    if ev_ebitda is not None and ev_ebitda > 0:
+        ev_pts = _smooth_score(ev_ebitda, lo=8, hi=18, max_pts=6, invert=True)
+        score += ev_pts
+        if ev_ebitda < 8:
+            signals.append(f"Low EV/EBITDA ({ev_ebitda:.1f})")
+        elif ev_ebitda > 25:
+            signals.append(f"High EV/EBITDA ({ev_ebitda:.1f})")
     # ── Smooth ROE score (higher better) ─────────────────────────────
     if roe is not None:
         # 5% ROE → -4, 18% ROE → +8 (smooth)
@@ -125,7 +135,8 @@ def compute(info: dict) -> dict:
     return {
         "score": score,
         "signals": signals,
-        "pe": pe, "pb": pb, "roe": roe, "debt_to_equity": de,
+        "pe": pe, "pb": pb, "ev_ebitda": ev_ebitda,
+        "roe": roe, "debt_to_equity": de,
         "eps_growth": eps_growth, "revenue_growth": rev_growth,
         "profit_margin": margin, "dividend_yield": div_yield,
         "market_cap": market_cap,
