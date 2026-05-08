@@ -65,17 +65,16 @@ WATCHLIST = WATCHLIST_INDIA + WATCHLIST_US
 # score applied via the cross-sectional post-processor — no longer folded
 # into fundamental.
 SCORE_WEIGHTS = {
-    "technical":      0.17,
-    "fundamental":    0.18,
-    "momentum":       0.28,
-    "sentiment":      0.05,
-    "forecast":       0.06,
-    "options":        0.04,   # US only; auto-redistributed for IN tickers
-    "quality":        0.10,   # Novy-Marx GPA, FCF, accruals, balance-sheet
-    "earnings_drift": 0.08,   # PEAD: post-earnings drift anomaly
-    "valuation":      0.04,   # sector-relative P/E rank (cross-sectional)
+    "technical":      0.12,
+    "fundamental":    0.10,
+    "momentum":       0.22,
+    "sentiment":      0.03,
+    "forecast":       0.03,
+    "options":        0.05,
+    "quality":        0.18,   # promoted
+    "earnings_drift": 0.12,   # promoted — strongest non-momentum anomaly
+    "valuation":      0.00,   # handled cross-sectionally only
 }
-
 # ── Technical thresholds ─────────────────────────────────────────────────────
 RSI_OVERSOLD = 35
 RSI_OVERBOUGHT = 70
