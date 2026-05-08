@@ -2,6 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, asdict, field
 from typing import Any, Iterable
+from tqdm import tqdm
 
 from config import SCORE_WEIGHTS
 from analysis import (
@@ -128,7 +129,7 @@ def analyze_batch(tickers: Iterable[TickerData]) -> list[StockReport]:
         - `cross_sectional`   : detail dict (sector_val_score, mom_z, ...)
     Verdicts are recomputed from the adjusted score.
     """
-    reports = [analyze(td) for td in tickers]
+    reports = [analyze(td) for td in tqdm(tickers, desc="Analyzing", unit="stock")]
     cross_sectional.apply(reports)
     for r in reports:
         if r.composite_score > 0:   # don't overwrite N/A errors

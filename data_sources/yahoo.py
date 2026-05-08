@@ -10,8 +10,8 @@ import pandas as pd
 import yfinance as yf
 from tqdm import tqdm
 
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 from config import MAX_WORKERS, FETCH_DELAY_MS
-
 log = logging.getLogger(__name__)
 
 

@@ -41,6 +41,7 @@ from telegram_bot import send_message, send_document
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("daily")
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -133,7 +134,7 @@ def _candidate_from(report, ticker: TickerData) -> TradeCandidate:
 
 
 # ── Main runner ──────────────────────────────────────────────────────────────
-def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True) -> None:
+def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshold: float = 70.0) -> None:
     log.info("=== Daily Run @ %s | mode=%s ===", datetime.now().isoformat(timespec="seconds"), mode)
 
     # 1) Build services
@@ -227,7 +228,7 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True) -> None:
     # 10) Run gate on new candidates (top N not currently held)
     candidate_bundles: list[CandidateBundle] = []
     held_set = {s.upper() for s in open_symbols}
-    new_pool = [r for r in reports if r.symbol.upper() not in held_set and r.composite_score >= 70][:30]
+    new_pool = [r for r in reports if r.symbol.upper() not in held_set and r.composite_score >= threshold][:30]
 
     for r in new_pool:
         td = data.get(r.symbol)
@@ -644,6 +645,7 @@ if __name__ == "__main__":
                    choices=["watchlist", "broad", "russell1000", "sp500", "nifty500"],
                    default=RUN_MODE)
     p.add_argument("--top", type=int, default=TOP_N)
+    p.add_argument("--threshold", type=float, default=70.0, help="Min composite score (default 70)")
     p.add_argument("--no-telegram", action="store_true")
     args = p.parse_args()
-    run(mode=args.mode, top_n=args.top, send_tg=not args.no_telegram)
+    run(mode=args.mode, top_n=args.top, send_tg=not args.no_telegram, threshold=args.threshold)

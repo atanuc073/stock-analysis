@@ -31,10 +31,15 @@ def nifty500_tickers() -> list[str]:
     """Fetch Nifty 500 constituents from NSE archives CSV."""
     url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
     try:
-        df = pd.read_csv(url)
+        import requests
+        from io import StringIO
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) StockAnalysis/1.0"}
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        df = pd.read_csv(StringIO(resp.text))
         return [f"{s.strip()}.NS" for s in df["Symbol"].tolist()]
     except Exception as e:
-        log.warning("Nifty 500 fetch failed: %s — falling back to static list", e)
+        log.warning("!!! Nifty 500 fetch FAILED: %s — using 10-stock fallback list !!!", e)
         return [
             "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
             "HINDUNILVR.NS", "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS",

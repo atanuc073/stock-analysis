@@ -111,7 +111,7 @@ def _run_backtest(data, dates, weights: dict, capital: float,
         use_regime=True,
         weights=weights,
     )
-    engine = BacktestEngine(cfg, data)
+    engine = BacktestEngine(data, cfg)
     result = engine.run(dates)
     if not result.equity_curve:
         return {"sharpe": -99.0, "cagr": -99.0, "calmar": -99.0,

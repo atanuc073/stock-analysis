@@ -76,8 +76,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="Initial capital (default: ₹10,00,000)")
     p.add_argument("--universe", default="watchlist",
                    help="watchlist | india | us | broad | RELIANCE.NS,TCS.NS,...")
-    p.add_argument("--threshold", type=float, default=70.0,
-                   help="Min composite score to buy (default 70)")
+    p.add_argument("--threshold", type=float, default=60.0,
+                   help="Min composite score to buy (default 60)")
     p.add_argument("--rebalance-days", type=int, default=5,
                    help="Rebalance every N trading days (default 5 = weekly)")
     p.add_argument("--max-positions", type=int, default=12)
@@ -89,8 +89,8 @@ def main(argv: list[str] | None = None) -> int:
                         "weights with neutral 50 for missing components.")
     p.add_argument("--output-dir", default=None,
                    help="Output directory (default reports/backtest/)")
-    p.add_argument("--max-workers", type=int, default=4,
-                   help="Concurrent fetches (default 4)")
+    p.add_argument("--max-workers", type=int, default=8,
+                   help="Concurrent fetches (default 8)")
     p.add_argument("--benchmark-india", default="^NSEI")
     p.add_argument("--benchmark-us", default="^GSPC")
     p.add_argument("--benchmark-india-broad", default="^CRSLDX",

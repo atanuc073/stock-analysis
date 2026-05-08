@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 class BacktestConfig:
     initial_capital: float = 1_000_000.0       # ₹10 lakh default
     rebalance_freq_days: int = 5               # weekly
-    min_score: float = 70.0                    # buy threshold
+    min_score: float = 60.0                    # buy threshold
     max_positions: int = 12                    # concurrent open positions
     base_position_weight: float = 0.10         # 10% of equity per new position
     max_position_weight: float = 0.15

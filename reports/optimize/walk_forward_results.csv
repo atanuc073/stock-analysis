@@ -1,0 +1,2 @@
+fold,train,test,best_candidate,train_score,test_score,test_cagr,test_sharpe,test_max_dd,test_trades,w_technical,w_fundamental,w_momentum,w_quality,w_earnings_drift
+1,2019-01-01..2023-03-14,2023-03-15..2024-12-31,2,0.653,1.578,29.18,1.578,-9.6,117,0.0,0.0,1.0,0.0,0.0

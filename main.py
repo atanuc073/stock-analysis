@@ -36,16 +36,13 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True) -> None:
     log.info("Fetching market data ...")
     data = fetch_many(symbols, period="1y")
 
-    log.info("Analyzing ...")
-    reports = []
-    valid_tds = []
-    for sym, td in tqdm(data.items(), desc="Analyzing"):
-        valid_tds.append(td)
+    log.info("Analyzing %d tickers ...", len(data))
     try:
-        reports = analyze_batch(valid_tds)
+        reports = analyze_batch(list(data.values()))
+    except Exception as e:
     except Exception as e:
         log.error("analyze_batch failed: %s — falling back to per-ticker", e)
-        for td in valid_tds:
+        for td in data.values():
             try:
                 reports.append(analyze(td))
             except Exception as ex:
