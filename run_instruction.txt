@@ -9,3 +9,10 @@ python daily_runner.py --mode russell1000
 
 # Run normal backtest — now includes Score_Calibration sheet
 python -m backtest.cli --start 2020-01-01 --end 2025-01-01 --universe broad
+
+
+# Diagnose: which factor is doing the work?
+.\.venv\Scripts\python.exe -m backtest.optimize --start 2019-01-01 --end 2025-01-01 --strategy sleeves
+
+# Search for optimal weights with walk-forward validation
+.\.venv\Scripts\python.exe -m backtest.optimize --start 2018-01-01 --end 2025-01-01 --candidates 80 --walk-forward
