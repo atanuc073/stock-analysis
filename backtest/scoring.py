@@ -27,7 +27,7 @@ class BacktestScore:
     market: str
     sector: str
     price: float
-    score: float
+    score: float                # per-ticker weighted composite
     technical: dict
     fundamental: dict
     momentum: dict
@@ -36,6 +36,14 @@ class BacktestScore:
     earnings_drift: dict
     atr_value: float
     annual_vol: float
+    adjusted_score: float = 0.0  # after cross-sectional pass; defaults to score
+    cross_sectional: dict = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.adjusted_score == 0.0:
+            self.adjusted_score = self.score
+        if self.cross_sectional is None:
+            self.cross_sectional = {}
 
 
 def _slice(hd: HistoricalData, asof: pd.Timestamp) -> pd.DataFrame:

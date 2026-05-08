@@ -145,3 +145,72 @@ def apply(reports: Iterable) -> list:
             r.all_signals.append(f"Top momentum (z={mom_z:.1f})")
 
     return list(reports)
+
+
+def apply_to_bt(scores: Iterable) -> list:
+    """Cross-sectional pass for `BacktestScore` objects.
+
+    Mirror of `apply()` but operates on the backtest dataclass. Since
+    `BacktestScore` has no `all_signals` field, signal text is skipped —
+    only `adjusted_score` and `cross_sectional` are populated.
+    """
+    bts = [s for s in scores if s is not None and getattr(s, "score", 0) > 0]
+    if len(bts) < 3:
+        for s in bts:
+            s.adjusted_score = s.score
+            s.cross_sectional = {}
+        return list(scores)
+
+    by_sector_pe: dict[str, list[float]] = {}
+    by_sector_pb: dict[str, list[float]] = {}
+    for s in bts:
+        sec = (s.sector or "Unknown") + "|" + (s.market or "")
+        pe = (s.fundamental or {}).get("pe")
+        pb = (s.fundamental or {}).get("pb")
+        if pe is not None and pe > 0:
+            by_sector_pe.setdefault(sec, []).append(pe)
+        if pb is not None and pb > 0:
+            by_sector_pb.setdefault(sec, []).append(pb)
+
+    mom_arr = np.array([(s.momentum or {}).get("score", 50.0) for s in bts])
+    qual_arr = np.array([(s.quality or {}).get("score", 50.0) for s in bts])
+
+    for i, s in enumerate(bts):
+        sec = (s.sector or "Unknown") + "|" + (s.market or "")
+        pe = (s.fundamental or {}).get("pe")
+        pb = (s.fundamental or {}).get("pb")
+        peers_pe = by_sector_pe.get(sec, [])
+        peers_pb = by_sector_pb.get(sec, [])
+
+        pe_pct = _percentile_score(pe, peers_pe, invert=True)
+        pb_pct = _percentile_score(pb, peers_pb, invert=True)
+        components = []
+        if pe_pct is not None: components.append((pe_pct, 0.6))
+        if pb_pct is not None: components.append((pb_pct, 0.4))
+        sec_val_score = (
+            sum(sc * w for sc, w in components) / sum(w for _, w in components)
+            if components else 50.0
+        )
+
+        mom_z = _zscore(mom_arr[i], mom_arr)
+        qual_z = _zscore(qual_arr[i], qual_arr)
+        ramp = float(np.clip((mom_z + qual_z) / 2.0, 0.0, 1.0))
+        rank_bonus = ramp * 100.0
+
+        adj = (
+            s.score
+            + (sec_val_score - 50.0) * SECTOR_VAL_WEIGHT
+            + (rank_bonus - 50.0) * RANK_BONUS_WEIGHT
+        )
+        if mom_z < -0.8 and qual_z < -0.8:
+            adj -= 2.0
+
+        s.adjusted_score = float(np.clip(adj, 0, 100))
+        s.cross_sectional = {
+            "sector_val_score": round(sec_val_score, 2),
+            "momentum_z": round(mom_z, 2),
+            "quality_z": round(qual_z, 2),
+            "rank_bonus_score": round(rank_bonus, 2),
+            "sector_peers_pe_n": len(peers_pe),
+        }
+    return list(scores)

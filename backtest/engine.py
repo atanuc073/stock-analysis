@@ -273,17 +273,35 @@ class BacktestEngine:
             s = score_at(hd, asof,
                          include_forecast=self.cfg.include_forecast,
                          live_weights=self.cfg.live_weights)
-            if s and s.score >= self.cfg.min_score:
-                # Hard block: skip stocks extended >40% above 200DMA (late-cycle
-                # blow-off tops). The technical scorer already penalizes these
-                # but the score can still clear 65 via fundamentals/momentum.
-                ext = s.technical.get("pct_above_sma200", 0.0)
-                if ext > 40.0:
-                    continue
-                scores.append(s)
+            if s is None:
+                continue
+            # Hard block: skip stocks extended >40% above 200DMA (late-cycle
+            # blow-off tops). The technical scorer already penalizes these
+            # but the score can still clear 65 via fundamentals/momentum.
+            ext = s.technical.get("pct_above_sma200", 0.0)
+            if ext > 40.0:
+                continue
+            scores.append(s)
         if not scores:
             return
-        scores.sort(key=lambda s: s.score, reverse=True)
+        # Cross-sectional pass over the full candidate universe (sector-relative
+        # valuation + universe momentum/quality z-score rank bonus). This must
+        # happen BEFORE the min_score filter so z-scores reflect the whole
+        # universe, not just the pre-filtered top tier.
+        try:
+            from analysis.cross_sectional import apply_to_bt
+            apply_to_bt(scores)
+        except Exception as e:
+            log.warning("cross-sectional pass failed: %s", e)
+            for s in scores:
+                if not hasattr(s, "adjusted_score") or not s.adjusted_score:
+                    s.adjusted_score = s.score
+
+        # Filter on adjusted_score so the backtest matches the live ranking.
+        scores = [s for s in scores if s.adjusted_score >= self.cfg.min_score]
+        if not scores:
+            return
+        scores.sort(key=lambda s: s.adjusted_score, reverse=True)
 
         equity = self.cash + self._market_value(current_prices)
         sector_weights = self._sector_weights(current_prices, equity)
@@ -304,10 +322,11 @@ class BacktestEngine:
             if market_weights.get(s.market, 0.0) >= 0.70:
                 continue
 
-            # Volatility-adjusted sizing × regime allocation multiplier
+            # Volatility-adjusted sizing × regime allocation multiplier.
+            # Use the cross-sectional adjusted score to match the live signal.
             base_w = self.cfg.base_position_weight
             vol_adj = min(0.25 / max(s.annual_vol, 0.05), 1.5)
-            score_adj = min(s.score / 70.0, 1.3)
+            score_adj = min(s.adjusted_score / 70.0, 1.3)
             regime_adj = self._regime_multiplier(s.market)
             target_w = min(
                 base_w * vol_adj * score_adj * regime_adj,
@@ -342,7 +361,7 @@ class BacktestEngine:
         pos = self.factory.create(
             symbol=s.symbol, qty=qty, entry_price=s.price,
             atr=s.atr_value, sector=s.sector, market=s.market,
-            score=s.score, entry_date=asof.strftime("%Y-%m-%d"),
+            score=s.adjusted_score, entry_date=asof.strftime("%Y-%m-%d"),
         )
         self.positions[s.symbol] = pos
         self.cash -= cost
@@ -353,8 +372,8 @@ class BacktestEngine:
             net_value=cost,
             timestamp=asof.isoformat(),
             sector=s.sector, market=s.market,
-            reason=f"score={s.score:.1f}",
-            score_at_entry=s.score,
+            reason=f"adj={s.adjusted_score:.1f} (raw={s.score:.1f})",
+            score_at_entry=s.adjusted_score,
         ))
 
     def _sector_weights(self, prices: dict[str, float], equity: float) -> dict[str, float]:
@@ -397,6 +416,8 @@ class BacktestEngine:
                                  include_forecast=False,
                                  live_weights=self.cfg.live_weights)
                     if s:
+                        # Use raw composite for thesis-break (cross-sectional
+                        # context is unavailable for a single ticker on exit).
                         current_score = s.score
 
             signals = self.exit_eval.evaluate(
