@@ -9,6 +9,3 @@ python daily_runner.py --mode russell1000
 
 # Run normal backtest — now includes Score_Calibration sheet
 python -m backtest.cli --start 2020-01-01 --end 2025-01-01 --universe broad
-
-# Run ablation study — see which components matter
-python -m backtest.ablation --start 2020-01-01 --end 2025-01-01 --universe broad

@@ -14,7 +14,7 @@ from typing import Optional
 
 import pandas as pd
 
-from analysis import technical, fundamental, momentum, forecast
+from analysis import technical, fundamental, momentum, forecast, quality, earnings_drift
 from analysis.indicators import atr, annualized_volatility
 from config import SCORE_WEIGHTS
 
@@ -32,6 +32,8 @@ class BacktestScore:
     fundamental: dict
     momentum: dict
     forecast: dict
+    quality: dict
+    earnings_drift: dict
     atr_value: float
     annual_vol: float
 
@@ -73,22 +75,26 @@ def score_at(hd: HistoricalData, asof: pd.Timestamp,
     fund = fundamental.compute(info)
     mom = momentum.compute(hist)
     fcst = forecast.compute(hist) if include_forecast else {"score": 50.0, "signals": []}
+    qual = quality.compute(info)
+    edrift = earnings_drift.compute(hist, info)
 
     w = dict(SCORE_WEIGHTS)
-    # 'valuation' is a meta-bonus folded into fundamental in the live scorer;
-    # absorb it here so weights line up with the four core sub-scores.
+    # 'valuation' is sector-relative (cross-sectional) and unavailable in
+    # per-ticker backtest scoring — drop it and renormalize via fundamental.
     valuation_w = w.pop("valuation", 0.0)
     w["fundamental"] = w.get("fundamental", 0.0) + valuation_w
 
     if live_weights:
         # Live-equivalent: keep all weights, neutral 50 for missing components.
         parts = {
-            "technical": tech.get("score", 50),
-            "fundamental": fund.get("score", 50),
-            "momentum": mom.get("score", 50),
-            "sentiment": 50.0,                                  # no historical news
-            "options": 50.0,                                    # no historical options
-            "forecast": fcst.get("score", 50) if include_forecast else 50.0,
+            "technical":      tech.get("score", 50),
+            "fundamental":    fund.get("score", 50),
+            "momentum":       mom.get("score", 50),
+            "sentiment":      50.0,                                  # no historical news
+            "options":        50.0,                                  # no historical options
+            "forecast":       fcst.get("score", 50) if include_forecast else 50.0,
+            "quality":        qual.get("score", 50),
+            "earnings_drift": edrift.get("score", 50),
         }
     else:
         # Legacy behavior: drop missing components, redistribute their weight
@@ -100,9 +106,11 @@ def score_at(hd: HistoricalData, asof: pd.Timestamp,
         w["momentum"] = w.get("momentum", 0) + dropped * 0.4
 
         parts = {
-            "technical": tech.get("score", 50),
-            "fundamental": fund.get("score", 50),
-            "momentum": mom.get("score", 50),
+            "technical":      tech.get("score", 50),
+            "fundamental":    fund.get("score", 50),
+            "momentum":       mom.get("score", 50),
+            "quality":        qual.get("score", 50),
+            "earnings_drift": edrift.get("score", 50),
         }
         if include_forecast:
             parts["forecast"] = fcst.get("score", 50)
@@ -120,6 +128,8 @@ def score_at(hd: HistoricalData, asof: pd.Timestamp,
         fundamental=fund,
         momentum=mom,
         forecast=fcst,
+        quality=qual,
+        earnings_drift=edrift,
         atr_value=float(atr(hist) or 0.0),
         annual_vol=float(annualized_volatility(hist) or 0.30),
     )

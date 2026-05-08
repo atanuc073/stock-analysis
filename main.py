@@ -10,7 +10,7 @@ from tqdm import tqdm
 from config import RUN_MODE, TOP_N, WATCHLIST
 from data_sources.yahoo import fetch_many
 from data_sources.universe import broad_universe, russell1000_tickers
-from analysis.composite import analyze
+from analysis.composite import analyze, analyze_batch
 from report_generator import write_reports, telegram_summary
 from telegram_bot import send_message, send_document
 
@@ -38,11 +38,18 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True) -> None:
 
     log.info("Analyzing ...")
     reports = []
+    valid_tds = []
     for sym, td in tqdm(data.items(), desc="Analyzing"):
-        try:
-            reports.append(analyze(td))
-        except Exception as e:
-            log.warning("analyze failed %s: %s", sym, e)
+        valid_tds.append(td)
+    try:
+        reports = analyze_batch(valid_tds)
+    except Exception as e:
+        log.error("analyze_batch failed: %s — falling back to per-ticker", e)
+        for td in valid_tds:
+            try:
+                reports.append(analyze(td))
+            except Exception as ex:
+                log.warning("analyze failed %s: %s", td.symbol, ex)
 
     reports = [r for r in reports if r.composite_score > 0]
     log.info("Analysis complete: %d valid reports", len(reports))

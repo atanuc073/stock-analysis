@@ -159,14 +159,19 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True) -> None:
         universe = WATCHLIST
     log.info("Universe: %d", len(universe))
     data = fetch_many(universe, period="1y")
-    reports = []
-    for sym, td in tqdm(data.items(), desc="Analyzing"):
-        try:
-            reports.append(analyze(td))
-        except Exception:
-            continue
+    try:
+        from analysis.composite import analyze_batch
+        reports = analyze_batch(list(data.values()))
+    except Exception:
+        reports = []
+        for sym, td in tqdm(data.items(), desc="Analyzing"):
+            try:
+                reports.append(analyze(td))
+            except Exception:
+                continue
     reports = [r for r in reports if r.composite_score > 0]
-    reports.sort(key=lambda r: r.composite_score, reverse=True)
+    # Sort by adjusted_score (universe-aware) when available, else composite.
+    reports.sort(key=lambda r: getattr(r, "adjusted_score", r.composite_score), reverse=True)
 
     # 3) Regime + sector ranks (parallel-safe but small enough sequential is fine)
     log.info("Detecting regime + sector rotation ...")

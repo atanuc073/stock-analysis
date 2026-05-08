@@ -59,14 +59,21 @@ WATCHLIST = WATCHLIST_INDIA + WATCHLIST_US
 # from 0.25 → 0.40 (matches the legacy backtest redistribution that produced
 # +101% / 5y, 75.7% win rate). Trimmed sentiment/forecast/fundamental to fund
 # the increase while keeping technical at 0.20.
+#
+# 2026-05 (later): added `quality` (Novy-Marx GPA + cash quality) and
+# `earnings_drift` (PEAD anomaly). `valuation` is now a true sector-relative
+# score applied via the cross-sectional post-processor — no longer folded
+# into fundamental.
 SCORE_WEIGHTS = {
-    "technical": 0.20,
-    "fundamental": 0.23,
-    "momentum": 0.32,
-    "sentiment": 0.07,
-    "forecast": 0.08,
-    "options": 0.05,  # US only; auto-redistributed for IN tickers
-    "valuation": 0.05,  # cheap-vs-sector bonus (folded into fundamental)
+    "technical":      0.17,
+    "fundamental":    0.18,
+    "momentum":       0.28,
+    "sentiment":      0.05,
+    "forecast":       0.06,
+    "options":        0.04,   # US only; auto-redistributed for IN tickers
+    "quality":        0.10,   # Novy-Marx GPA, FCF, accruals, balance-sheet
+    "earnings_drift": 0.08,   # PEAD: post-earnings drift anomaly
+    "valuation":      0.04,   # sector-relative P/E rank (cross-sectional)
 }
 
 # ── Technical thresholds ─────────────────────────────────────────────────────
