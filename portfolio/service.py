@@ -143,6 +143,7 @@ class PortfolioService:
         prices: dict[str, float],
         scores: dict[str, float] | None = None,
         red_flags: dict[str, int] | None = None,
+        regime_shock: bool = False,
     ) -> list[ExitSignal]:
         state = self._repo.load()
         scores = scores or {}
@@ -157,7 +158,10 @@ class PortfolioService:
                 p, cp,
                 current_score=scores.get(p.symbol),
                 red_flags=red_flags.get(p.symbol, 0),
+                regime_shock=regime_shock,
             ))
+        # Persist updated below_stop_streak counters
+        self._repo.save(state)
         return signals
 
     def equity_snapshot(self, prices: dict[str, float]) -> EquitySnapshot:

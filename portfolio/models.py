@@ -52,6 +52,9 @@ class Position:
     status: PositionStatus = PositionStatus.OPEN
     realized_pnl: float = 0.0
     notes: str = ""
+    # Number of consecutive bars (days) the price has closed at or below
+    # stop_price. Used for 2-bar confirmation to avoid flash-crash whipsaws.
+    below_stop_streak: int = 0
 
     def to_dict(self) -> dict:
         d = asdict(self)

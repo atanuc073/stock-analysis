@@ -49,6 +49,12 @@ class BacktestConfig:
     use_regime: bool = True                     # enable market regime filter
     regime_skip_below: str = "BEAR"            # skip entries at or below this regime
     regime_check_freq_days: int = 5            # re-evaluate regime every N days
+    # Shock-day stop suppression: if VIX day-over-day jumps >= shock_vix_jump
+    # AND the broad index drops <= shock_index_drop on the same day, treat
+    # it as a panic day and skip soft stop-loss exits (still honours deep
+    # breaches via lifecycle.hard_stop_buffer).
+    shock_vix_jump: float = 0.30               # +30% one-day VIX jump
+    shock_index_drop: float = -0.03            # -3% one-day index drop
     weights: Optional[dict] = None              # per-run override of SCORE_WEIGHTS (None = use config)
 
     @property
@@ -149,14 +155,19 @@ class BacktestEngine:
                 if cp is not None:
                     ExitEvaluator.update_peak(pos, cp)
 
+            # 1b) Detect macro shock day (VIX spike + index drop)
+            shock = self._is_shock_day(asof)
+
             # 2) Evaluate exits every day (tighter risk control)
-            self._process_exits(asof, current_prices, evaluate_thesis=False)
+            self._process_exits(asof, current_prices, evaluate_thesis=False,
+                                regime_shock=shock)
 
             # 3) Rebalance entries weekly (or whatever cadence)
             if asof in rebalance_dates:
                 self._rebalance(asof, current_prices)
                 # Re-process exits with thesis break (using updated scores)
-                self._process_exits(asof, current_prices, evaluate_thesis=True)
+                self._process_exits(asof, current_prices, evaluate_thesis=True,
+                                    regime_shock=shock)
 
             # 4) Record equity
             mv = self._market_value(current_prices)
@@ -401,8 +412,36 @@ class BacktestEngine:
         return out
 
     # ── Exits ────────────────────────────────────────────────────────────────
+    def _is_shock_day(self, asof: pd.Timestamp) -> bool:
+        """True if any tracked market shows a VIX spike + index gap-down today.
+
+        Uses the regime_data series passed at construction. Cheap O(1) lookup.
+        """
+        if not self.regime_data:
+            return False
+        for mkt, series in self.regime_data.items():
+            idx = series.get("index")
+            vix = series.get("vix")
+            if idx is None or vix is None or idx.empty or vix.empty:
+                continue
+            if idx.index.tz is not None:
+                idx = idx.copy(); idx.index = idx.index.tz_localize(None)
+            if vix.index.tz is not None:
+                vix = vix.copy(); vix.index = vix.index.tz_localize(None)
+            idx_hist = idx[idx.index <= asof]
+            vix_hist = vix[vix.index <= asof]
+            if len(idx_hist) < 2 or len(vix_hist) < 2:
+                continue
+            idx_chg = idx_hist.iloc[-1] / idx_hist.iloc[-2] - 1
+            vix_chg = vix_hist.iloc[-1] / vix_hist.iloc[-2] - 1
+            if (vix_chg >= self.cfg.shock_vix_jump
+                    and idx_chg <= self.cfg.shock_index_drop):
+                return True
+        return False
+
     def _process_exits(self, asof: pd.Timestamp, prices: dict[str, float],
-                       evaluate_thesis: bool) -> None:
+                       evaluate_thesis: bool,
+                       regime_shock: bool = False) -> None:
         for sym, pos in list(self.positions.items()):
             if pos.status == PositionStatus.CLOSED:
                 continue
@@ -425,7 +464,7 @@ class BacktestEngine:
 
             signals = self.exit_eval.evaluate(
                 pos, cp, current_score=current_score, red_flags=0,
-                today=asof.date(),
+                today=asof.date(), regime_shock=regime_shock,
             )
             for sig in signals:
                 self._execute_exit(pos, sig, asof)

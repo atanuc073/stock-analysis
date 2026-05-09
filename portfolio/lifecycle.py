@@ -19,6 +19,8 @@ DEFAULT_TRAILING_PCT = 0.18          # trail 18% off peak after T2
 DEFAULT_TIME_STOP_DAYS = 365
 DEFAULT_TIME_STOP_BAND = (-0.05, 0.10)  # if return between -5% and +10% at time-stop, exit
 DEFAULT_THESIS_BREAK_SCORE = 50.0
+DEFAULT_STOP_CONFIRM_BARS = 2  # close ≤ stop on N consecutive bars before firing
+DEFAULT_HARD_STOP_BUFFER = 0.025  # if price < hard_stop * (1 - this), fire immediately
 
 
 # ── Position factory ─────────────────────────────────────────────────────────
@@ -94,6 +96,13 @@ class ExitConfig:
     time_stop_days: int = DEFAULT_TIME_STOP_DAYS
     time_stop_band: tuple = DEFAULT_TIME_STOP_BAND
     thesis_break_score: float = DEFAULT_THESIS_BREAK_SCORE
+    # Stop must be breached on this many consecutive closes before firing.
+    # Eliminates 1-day flash-crash whipsaws (2018 Q4, 2020 covid). 1 = legacy
+    # behaviour.
+    stop_confirm_bars: int = DEFAULT_STOP_CONFIRM_BARS
+    # Even with confirmation, fire immediately if price collapses well below
+    # the stop on a single bar (real breakdown, not noise).
+    hard_stop_buffer: float = DEFAULT_HARD_STOP_BUFFER
 
 
 class ExitEvaluator:
@@ -113,8 +122,18 @@ class ExitEvaluator:
         current_score: Optional[float] = None,
         red_flags: int = 0,
         today: Optional[date] = None,
+        regime_shock: bool = False,
     ) -> list[ExitSignal]:
-        """Return zero or more exit signals. Tiers stack; stops short-circuit."""
+        """Return zero or more exit signals. Tiers stack; stops short-circuit.
+
+        Parameters
+        ----------
+        regime_shock
+            If True, the broad market is in a panic-day state (VIX spike +
+            index gap-down). Stop checks are skipped — we don't sell into
+            a flash crash. Tier targets and hard-deep-breach exits still run.
+            Pass via the engine using same-day macro inputs.
+        """
         if position.status == PositionStatus.CLOSED or position.qty_open <= 0:
             return []
         today = today or date.today()
@@ -130,10 +149,24 @@ class ExitEvaluator:
             return [self._full_exit(position, current_price, ExitType.THESIS_BREAK,
                                     f"Score {current_score:.1f} < {self.cfg.thesis_break_score}")]
 
-        # 3) STOP LOSS — short-circuits everything else
+        # 3) STOP LOSS — with N-bar confirmation + flash-crash protection
         if current_price <= position.stop_price:
-            return [self._full_exit(position, current_price, ExitType.STOP_LOSS,
-                                    f"Price {current_price:.2f} ≤ stop {position.stop_price:.2f}")]
+            position.below_stop_streak += 1
+            # Always fire on a deep breach (genuine breakdown, not noise)
+            deep_breach = current_price <= position.stop_price * (1 - self.cfg.hard_stop_buffer)
+            confirmed = position.below_stop_streak >= self.cfg.stop_confirm_bars
+            # Skip the soft-confirm path during a market-wide panic day,
+            # but still honour a deep breach.
+            if deep_breach or (confirmed and not regime_shock):
+                return [self._full_exit(
+                    position, current_price, ExitType.STOP_LOSS,
+                    f"Price {current_price:.2f} ≤ stop {position.stop_price:.2f}"
+                    + (" (deep breach)" if deep_breach else f" ({position.below_stop_streak} bars)"),
+                )]
+            # Otherwise: keep the streak counter armed; do NOT exit yet.
+        else:
+            # Price reclaimed the stop — reset the streak.
+            position.below_stop_streak = 0
 
         # 4) TIER targets (T1, T2) — partial exits
         for idx, tier in enumerate(position.tiers):
