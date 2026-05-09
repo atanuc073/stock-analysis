@@ -25,3 +25,4 @@ python -m backtest.cli --start 2020-01-01 --end 2025-01-01 --universe broad
 
 # 3. Random search walk-forward (the gold standard)
 .\.venv\Scripts\python.exe -m backtest.optimize --start 2018-01-01 --end 2025-01-01 --candidates 80 --walk-forward
+

@@ -41,9 +41,9 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True) -> None:
     data = fetch_many(symbols, period="1y")
 
     log.info("Analyzing %d tickers ...", len(data))
+    reports = []
     try:
         reports = analyze_batch(list(data.values()))
-    except Exception as e:
     except Exception as e:
         log.error("analyze_batch failed: %s — falling back to per-ticker", e)
         for td in data.values():
