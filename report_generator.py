@@ -135,6 +135,133 @@ def _verdict_fill(verdict: str) -> PatternFill:
     return PatternFill(start_color=c, end_color=c, fill_type="solid")
 
 
+def _risk_flags(r) -> str:
+    """Compact risk indicators for quick filtering."""
+    flags = []
+    t = r.technical or {}
+    m = r.momentum or {}
+    ed = r.earnings_drift or {}
+    rsi = t.get("rsi") or 0
+    pct_from_high = t.get("pct_from_52w_high")
+    vol_ratio = t.get("volume_ratio") or 1.0
+    if t.get("extended_at_high") or rsi >= 75 or (pct_from_high is not None and pct_from_high > -2):
+        flags.append("EXT")
+    if t.get("above_sma200") is False:
+        flags.append("BEAR")
+    r1w = m.get("ret_1w")
+    if r1w is not None and r1w < -8:
+        flags.append("KNIFE")
+    if vol_ratio < 0.4:
+        flags.append("THIN")
+    days = ed.get("earnings_gap_days_ago")
+    if days is not None and 0 <= days <= 7:
+        flags.append("ERPOST")
+    if rsi and rsi <= 30:
+        flags.append("OS")  # oversold = potential opportunity
+    return " ".join(flags)
+
+
+def _swing_setup(r) -> dict | None:
+    """Evaluate a ticker as a 90-day swing trade setup.
+
+    Returns a dict with entry/stop/target/RR/conviction, or None if it does
+    not meet baseline filters.
+    """
+    t = r.technical or {}
+    m = r.momentum or {}
+    f = r.fundamental or {}
+    fc = r.forecast or {}
+    q = r.quality or {}
+
+    price = r.price or t.get("price") or 0
+    if price <= 0:
+        return None
+
+    rsi = t.get("rsi") or 0
+    above_50 = bool(t.get("above_sma50"))
+    above_200 = bool(t.get("above_sma200"))
+    pct_from_high = t.get("pct_from_52w_high")
+    vol_ratio = t.get("volume_ratio") or 1.0
+    score = r.composite_score or 0
+    adj = r.adjusted_score or score
+    flags = _risk_flags(r).split()
+
+    # ── Hard filters (must pass all) ─────────────────────────────────
+    if score < 60: return None
+    if adj < 58: return None
+    if not (above_50 and above_200): return None
+    if not (38 <= rsi <= 68): return None
+    if pct_from_high is None or not (-22 <= pct_from_high <= -3): return None
+    if vol_ratio < 0.8: return None
+    if any(bad in flags for bad in ("EXT", "BEAR", "KNIFE", "ERPOST", "THIN")):
+        return None
+    # avoid binary earnings risk if earnings hit very recently or imminent
+    ed = r.earnings_drift or {}
+    er_days = ed.get("earnings_gap_days_ago")
+    if er_days is not None and er_days < 5:
+        return None
+
+    # ── Targets / stops (90-day horizon) ─────────────────────────────
+    # Stop: max of (SMA50-style 7% below) or ATR-proxy via 52W range
+    stop_pct = 0.07
+    stop = round(price * (1 - stop_pct), 2)
+
+    # Target: blend of forecast and rule-of-thumb (12-18% over 90d)
+    fc_target = fc.get("forecast_price") or 0
+    fc_ret = fc.get("expected_return_pct") or 0
+    # Annualize-ish: 21d forecast → 90d ≈ x4.3, capped at +25%
+    target_ret_90d = max(0.10, min(fc_ret * 4 / 100 if fc_ret else 0.12, 0.25))
+    target = round(price * (1 + target_ret_90d), 2)
+    if fc_target and fc_target > price * 1.10:
+        target = round(max(target, fc_target * 1.05), 2)  # extend if forecast is bullish
+
+    rr = round((target - price) / max(price - stop, 0.01), 2)
+
+    # ── Setup quality 0-100 (confluence-based) ───────────────────────
+    sq = 50
+    sq += min(20, (score - 60) * 1.0)            # composite tilt
+    sq += min(8, (adj - 58) * 0.8)               # cross-sectional tilt
+    if 45 <= rsi <= 60: sq += 6                  # ideal RSI band
+    if -15 <= pct_from_high <= -5: sq += 6       # ideal pullback zone
+    if vol_ratio >= 1.2: sq += 5
+    if vol_ratio >= 1.5: sq += 3
+    eps_g = f.get("eps_growth") or 0
+    if eps_g > 0.10: sq += 4
+    if eps_g > 0.20: sq += 3
+    if (q.get("score") or 50) >= 60: sq += 4
+    if (m.get("score") or 50) >= 65: sq += 4
+    if rr >= 2.0: sq += 4
+    if rr >= 3.0: sq += 3
+    sq = max(0, min(100, sq))
+
+    # Conviction tier
+    if sq >= 78 and rr >= 2.0:
+        conviction = "A"
+        size_pct = 7.0
+    elif sq >= 68 and rr >= 1.6:
+        conviction = "B"
+        size_pct = 5.0
+    else:
+        conviction = "C"
+        size_pct = 3.0
+
+    return {
+        "entry": round(price, 2),
+        "stop": stop,
+        "target": target,
+        "stop_pct": round(-stop_pct * 100, 1),
+        "target_pct": round(target_ret_90d * 100, 1),
+        "rr": rr,
+        "setup_quality": round(sq, 0),
+        "conviction": conviction,
+        "size_pct": size_pct,
+        "rsi": rsi,
+        "vol_ratio": vol_ratio,
+        "pct_from_high": pct_from_high,
+        "er_days": er_days,
+    }
+
+
 def _auto_width(ws, min_width=8, max_width=30):
     """Auto-fit column widths based on content."""
     for col_cells in ws.columns:
@@ -167,19 +294,33 @@ def render_excel(reports: list, top_n: int = 15) -> Workbook:
     ws.title = "Dashboard"
     headers = [
         "#", "Ticker", "Market", "Name", "Sector", "Price",
-        "Score", "Verdict", "RSI",
+        "Score", "Adj Score", "Verdict",
+        "Tech", "Fund", "Mom", "Qual",
+        "RSI", "% from 52WH", "Vol Ratio", ">200DMA",
         "1D %", "1W %", "1M %", "3M %",
-        "P/E", "P/B", "ROE %", "D/E",
+        "P/E", "P/B", "ROE %", "D/E", "FCF Yield %",
         "EPS Gr %", "Rev Gr %", "Div Yield %",
-        "Forecast 21d %", "Signals",
+        "ER Gap %", "Days Since ER",
+        "Forecast 21d %",
+        "Risk Flags", "Signals",
     ]
     ws.append(headers)
     _style_header_row(ws)
 
+    score_col = headers.index("Score") + 1
+    adj_col = headers.index("Adj Score") + 1
+    verdict_col = headers.index("Verdict") + 1
+    flags_col = headers.index("Risk Flags") + 1
+    signals_col = headers.index("Signals") + 1
+
     for i, r in enumerate(sorted_rs, 1):
-        f = r.fundamental
-        m = r.momentum
-        fc = r.forecast
+        f = r.fundamental or {}
+        m = r.momentum or {}
+        fc = r.forecast or {}
+        t = r.technical or {}
+        q = r.quality or {}
+        ed = r.earnings_drift or {}
+        fcf_y = q.get("fcf_yield")
         row = [
             i,
             r.symbol,
@@ -188,8 +329,16 @@ def render_excel(reports: list, top_n: int = 15) -> Workbook:
             (r.sector or "")[:20],
             round(r.price, 2),
             round(r.composite_score, 1),
+            round(r.adjusted_score or r.composite_score, 1),
             r.verdict,
-            round(r.technical.get("rsi", 0), 1),
+            round(t.get("score") or 0, 0),
+            round(f.get("score") or 0, 0),
+            round(m.get("score") or 0, 0),
+            round(q.get("score") or 0, 0),
+            round(t.get("rsi", 0), 1),
+            round(t.get("pct_from_52w_high") or 0, 1),
+            round(t.get("volume_ratio") or 0, 2),
+            "Yes" if t.get("above_sma200") else "No",
             round(m.get("ret_1d") or 0, 2),
             round(m.get("ret_1w") or 0, 2),
             round(m.get("ret_1m") or 0, 2),
@@ -198,33 +347,60 @@ def render_excel(reports: list, top_n: int = 15) -> Workbook:
             round(f.get("pb") or 0, 2) if f.get("pb") else None,
             round((f.get("roe") or 0) * 100, 1),
             round(f.get("debt_to_equity") or 0, 1) if f.get("debt_to_equity") else None,
+            round(fcf_y * 100, 2) if fcf_y is not None else None,
             round((f.get("eps_growth") or 0) * 100, 1),
             round((f.get("revenue_growth") or 0) * 100, 1),
             round(f.get("dividend_yield") or 0, 2),
+            round((ed.get("earnings_gap_pct") or 0), 2) if ed.get("earnings_gap_pct") is not None else None,
+            ed.get("earnings_gap_days_ago"),
             round(fc.get("expected_return_pct") or 0, 2),
+            _risk_flags(r),
             "; ".join(r.all_signals[:5]),
         ]
         ws.append(row)
         row_num = i + 1  # header is row 1
-        # Color-code score cell
-        score_cell = ws.cell(row=row_num, column=7)
+        # Color-code Score cell
+        score_cell = ws.cell(row=row_num, column=score_col)
         score_cell.fill = _score_fill(r.composite_score)
         score_cell.font = Font(name="Calibri", bold=True, size=10,
                                color="FFFFFF" if r.composite_score >= 55 or r.composite_score < 35 else "000000")
-        # Color-code verdict cell
-        verdict_cell = ws.cell(row=row_num, column=8)
+        # Color-code Adjusted Score cell
+        adj_val = r.adjusted_score or r.composite_score
+        adj_cell = ws.cell(row=row_num, column=adj_col)
+        adj_cell.fill = _score_fill(adj_val)
+        adj_cell.font = Font(name="Calibri", bold=True, size=10,
+                             color="FFFFFF" if adj_val >= 55 or adj_val < 35 else "000000")
+        # Color-code Verdict cell
+        verdict_cell = ws.cell(row=row_num, column=verdict_col)
         verdict_cell.fill = _verdict_fill(r.verdict)
         verdict_cell.font = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+        # Color-code component sub-scores (Tech, Fund, Mom, Qual)
+        for sub_col in range(headers.index("Tech") + 1, headers.index("Qual") + 2):
+            sub_cell = ws.cell(row=row_num, column=sub_col)
+            try:
+                v = float(sub_cell.value) if sub_cell.value is not None else 0
+                sub_cell.fill = _score_fill(v)
+                sub_cell.font = Font(name="Calibri", size=9,
+                                     color="FFFFFF" if v >= 55 or v < 35 else "000000")
+            except (TypeError, ValueError):
+                pass
+        # Risk flags styling: red bold if any flags present
+        flags_cell = ws.cell(row=row_num, column=flags_col)
+        if flags_cell.value:
+            flags_cell.font = Font(name="Calibri", bold=True, size=9, color="C0392B")
         # Style all cells in this row
         for col_idx in range(1, len(headers) + 1):
             cell = ws.cell(row=row_num, column=col_idx)
             cell.border = _BORDER
             if cell.font == Font():  # only set if not already styled
                 cell.font = _DATA_FONT
-            cell.alignment = _CENTER if col_idx <= 9 else _LEFT if col_idx == len(headers) else _CENTER
+            if col_idx == signals_col:
+                cell.alignment = _LEFT
+            else:
+                cell.alignment = _CENTER
 
-    # Freeze header + auto-filter
-    ws.freeze_panes = "A2"
+    # Freeze pane after Verdict column for easy scrolling
+    ws.freeze_panes = ws.cell(row=2, column=verdict_col + 1).coordinate
     ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
     _auto_width(ws)
 
@@ -305,7 +481,116 @@ def render_excel(reports: list, top_n: int = 15) -> Workbook:
     ws2.auto_filter.ref = f"A1:{get_column_letter(len(detail_headers))}1"
     _auto_width(ws2)
 
-    # ── Sheet 3: Avoid / Weak ───────────────────────────────────────────
+    # ── Sheet 3: Swing 90D Scanner ──────────────────────────────────────
+    ws_sw = wb.create_sheet(title="Swing 90D")
+    swing_headers = [
+        "Rank", "Ticker", "Market", "Name", "Sector",
+        "Conviction", "Setup Q", "Score", "Adj Score",
+        "Entry", "Stop", "Target", "Stop %", "Target %", "R:R",
+        "Size %",
+        "RSI", "Vol Ratio", "% from 52WH", "Days Since ER",
+        "EPS Gr %", "ROE %", "Forecast 21d %",
+        "Top Signals",
+    ]
+    ws_sw.append(swing_headers)
+    _style_header_row(ws_sw)
+
+    swing_candidates = []
+    for r in sorted_rs:
+        setup = _swing_setup(r)
+        if setup is None:
+            continue
+        swing_candidates.append((r, setup))
+    # Sort: conviction tier first, then setup quality
+    tier_order = {"A": 0, "B": 1, "C": 2}
+    swing_candidates.sort(
+        key=lambda x: (tier_order.get(x[1]["conviction"], 9), -x[1]["setup_quality"])
+    )
+
+    conv_fill = {
+        "A": PatternFill(start_color="1ABC9C", end_color="1ABC9C", fill_type="solid"),
+        "B": PatternFill(start_color="2ECC71", end_color="2ECC71", fill_type="solid"),
+        "C": PatternFill(start_color="F1C40F", end_color="F1C40F", fill_type="solid"),
+    }
+
+    for rank, (r, sp) in enumerate(swing_candidates, 1):
+        f = r.fundamental or {}
+        fc = r.forecast or {}
+        ws_sw.append([
+            rank,
+            r.symbol,
+            r.market,
+            (r.name or "")[:28],
+            (r.sector or "")[:20],
+            sp["conviction"],
+            int(sp["setup_quality"]),
+            round(r.composite_score, 1),
+            round(r.adjusted_score or r.composite_score, 1),
+            sp["entry"],
+            sp["stop"],
+            sp["target"],
+            sp["stop_pct"],
+            sp["target_pct"],
+            sp["rr"],
+            sp["size_pct"],
+            round(sp["rsi"], 1),
+            round(sp["vol_ratio"], 2),
+            round(sp["pct_from_high"], 1),
+            sp["er_days"] if sp["er_days"] is not None else "—",
+            round((f.get("eps_growth") or 0) * 100, 1),
+            round((f.get("roe") or 0) * 100, 1),
+            round(fc.get("expected_return_pct") or 0, 2),
+            "; ".join(r.all_signals[:4]),
+        ])
+        row_num = rank + 1
+        # Color conviction
+        conv_cell = ws_sw.cell(row=row_num, column=swing_headers.index("Conviction") + 1)
+        conv_cell.fill = conv_fill.get(sp["conviction"], PatternFill())
+        conv_cell.font = Font(name="Calibri", bold=True, size=11, color="FFFFFF")
+        # Color setup quality
+        sq_cell = ws_sw.cell(row=row_num, column=swing_headers.index("Setup Q") + 1)
+        sq_cell.fill = _score_fill(sp["setup_quality"])
+        sq_cell.font = Font(name="Calibri", bold=True, size=10,
+                            color="FFFFFF" if sp["setup_quality"] >= 55 or sp["setup_quality"] < 35 else "000000")
+        # Color score
+        sc_cell = ws_sw.cell(row=row_num, column=swing_headers.index("Score") + 1)
+        sc_cell.fill = _score_fill(r.composite_score)
+        sc_cell.font = Font(name="Calibri", bold=True, size=10,
+                            color="FFFFFF" if r.composite_score >= 55 or r.composite_score < 35 else "000000")
+        # Highlight R:R
+        rr_cell = ws_sw.cell(row=row_num, column=swing_headers.index("R:R") + 1)
+        if sp["rr"] >= 2.5:
+            rr_cell.fill = PatternFill(start_color="27AE60", end_color="27AE60", fill_type="solid")
+            rr_cell.font = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+        elif sp["rr"] >= 1.5:
+            rr_cell.fill = PatternFill(start_color="F1C40F", end_color="F1C40F", fill_type="solid")
+            rr_cell.font = Font(name="Calibri", bold=True, size=10, color="000000")
+
+    # Border + alignment for all rows
+    for row_cells in ws_sw.iter_rows(min_row=2, max_row=ws_sw.max_row, max_col=len(swing_headers)):
+        for cell in row_cells:
+            cell.border = _BORDER
+            if cell.font == Font():
+                cell.font = _DATA_FONT
+            if cell.column == swing_headers.index("Top Signals") + 1:
+                cell.alignment = _LEFT
+            else:
+                cell.alignment = _CENTER
+
+    # Add a legend / instructions row block above the data via a comment row
+    # (kept simple — just freeze + filter)
+    ws_sw.freeze_panes = "F2"  # freeze through Conviction column
+    ws_sw.auto_filter.ref = f"A1:{get_column_letter(len(swing_headers))}1"
+    _auto_width(ws_sw)
+
+    # If no candidates, write a friendly note in row 2
+    if not swing_candidates:
+        ws_sw.cell(row=2, column=1, value="No swing setups passed filters today.").font = Font(
+            name="Calibri", italic=True, size=11, color="808080"
+        )
+        ws_sw.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(swing_headers))
+
+    # ── Sheet 4: Avoid / Weak ───────────────────────────────────────────
     ws3 = wb.create_sheet(title="Avoid - Weak")
     avoid_headers = ["Ticker", "Name", "Market", "Score", "Verdict", "Price", "RSI", "1M %", "3M %", "Key Reason"]
     ws3.append(avoid_headers)

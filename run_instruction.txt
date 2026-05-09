@@ -17,29 +17,11 @@ python -m backtest.cli --start 2020-01-01 --end 2025-01-01 --universe broad
 # Search for optimal weights with walk-forward validation
 .\.venv\Scripts\python.exe -m backtest.optimize --start 2018-01-01 --end 2025-01-01 --candidates 80 --walk-forward
 
+# 1. Sleeves with walk-forward (4 folds, see if momentum wins consistently)
+.\.venv\Scripts\python.exe -m backtest.optimize --start 2018-01-01 --end 2025-01-01 --strategy sleeves --walk-forward
 
+# 2. Random search single-split (find best blend, not just best single factor)
+.\.venv\Scripts\python.exe -m backtest.optimize --start 2018-01-01 --end 2025-01-01 --candidates 100 --strategy random
 
-(.venv) PS D:\MY_WORK\stock_analysis> .\.venv\Scripts\python.exe -m backtest.optimize --start 2019-01-01 --end 2025-01-01 --strategy sleeves
->>
-18:46:41 [INFO] backtest.optimize: Strategy=sleeves: testing 5 single-factor configurations
-18:46:41 [INFO] backtest.data_loader: Loading 49 symbols using 4 workers (staggered, warmup=365d → fetch from 2018-01-01)
-Loading history: 100%|██████████████████████████████████████████████████████| 49/49 [00:02<00:00, 21.24it/s]
-18:46:51 [INFO] backtest.data_loader: Loaded 48/49 symbols
-18:46:51 [INFO] backtest.optimize: Loaded 48/49 symbols
-18:46:51 [INFO] backtest.optimize: Single split: train=[2019-01-01..2023-03-14] test=[2023-03-15..2024-12-31]
-18:46:51 [INFO] backtest.optimize: Fold 1: train 2019-01-01..2023-03-14 (1090 days), test 2023-03-15..2024-12-31 (466 days)
-Traceback (most recent call last):
-  File "C:\Users\atanu\AppData\Local\Programs\Python\Python310\lib\runpy.py", line 196, in _run_module_as_main
-    return _run_code(code, main_globals, None,
-  File "C:\Users\atanu\AppData\Local\Programs\Python\Python310\lib\runpy.py", line 86, in _run_code
-    exec(code, run_globals)
-  File "D:\MY_WORK\stock_analysis\backtest\optimize.py", line 319, in <module>
-    sys.exit(main())
-  File "D:\MY_WORK\stock_analysis\backtest\optimize.py", line 248, in main
-    stats = _run_backtest(data, train_dates, w,
-  File "D:\MY_WORK\stock_analysis\backtest\optimize.py", line 114, in _run_backtest
-    engine = BacktestEngine(cfg, data)
-  File "D:\MY_WORK\stock_analysis\backtest\engine.py", line 122, in __init__
-    self.cash: float = self.cfg.initial_capital
-AttributeError: 'dict' object has no attribute 'initial_capital'
-(.venv) PS D:\MY_WORK\stock_analysis> 
+# 3. Random search walk-forward (the gold standard)
+.\.venv\Scripts\python.exe -m backtest.optimize --start 2018-01-01 --end 2025-01-01 --candidates 80 --walk-forward
