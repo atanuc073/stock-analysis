@@ -108,3 +108,41 @@ def russell1000_tickers() -> list[str]:
 
 def broad_universe() -> list[str]:
     return nifty500_tickers() + sp500_tickers()
+
+
+@lru_cache(maxsize=1)
+def nse_all_tickers() -> list[str]:
+    """Fetch the full NSE equity universe (~2000 tickers) from EQUITY_L.csv.
+
+    Includes every actively listed equity on the NSE main board (EQ series),
+    filtered to series='EQ' to drop ETFs, debt, and special-purpose listings.
+    Falls back to nifty500 if the fetch fails.
+    """
+    url = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+    try:
+        import requests
+        from io import StringIO
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) StockAnalysis/1.0",
+            "Accept": "text/csv,application/csv;q=0.9,*/*;q=0.8",
+        }
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        df = pd.read_csv(StringIO(resp.text))
+        # Normalize header whitespace
+        df.columns = [c.strip() for c in df.columns]
+        # Series 'EQ' = main-board equities (drops BE/BZ/IL/SM/T0 etc.)
+        if "SERIES" in df.columns:
+            df = df[df["SERIES"].astype(str).str.strip() == "EQ"]
+        symbols = [f"{s.strip()}.NS" for s in df["SYMBOL"].dropna().astype(str)]
+        # De-dupe while preserving order
+        seen, out = set(), []
+        for s in symbols:
+            if s not in seen:
+                seen.add(s)
+                out.append(s)
+        log.info("NSE all-equity universe: %d tickers", len(out))
+        return out
+    except Exception as e:
+        log.warning("NSE all-equity fetch failed: %s — falling back to Nifty 500", e)
+        return nifty500_tickers()

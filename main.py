@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from config import RUN_MODE, TOP_N, WATCHLIST
 from data_sources.yahoo import fetch_many
-from data_sources.universe import broad_universe, russell1000_tickers
+from data_sources.universe import broad_universe, russell1000_tickers, nifty500_tickers, nse_all_tickers
 from analysis.composite import analyze, analyze_batch
 from report_generator import write_reports, telegram_summary
 from telegram_bot import send_message, send_document
@@ -29,6 +29,10 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True) -> None:
         symbols = broad_universe()
     elif mode == "russell1000":
         symbols = russell1000_tickers()
+    elif mode == "nifty500":
+        symbols = nifty500_tickers()
+    elif mode == "niftytotal":
+        symbols = nse_all_tickers()
     else:
         symbols = WATCHLIST
     log.info("Universe: %d tickers", len(symbols))
@@ -68,7 +72,7 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["watchlist", "broad", "russell1000"], default=RUN_MODE)
+    parser.add_argument("--mode", choices=["watchlist", "broad", "russell1000", "nifty500", "niftytotal"], default=RUN_MODE)
     parser.add_argument("--top", type=int, default=TOP_N)
     parser.add_argument("--no-telegram", action="store_true")
     args = parser.parse_args()
