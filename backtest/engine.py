@@ -54,6 +54,33 @@ class BacktestConfig:
     # toward `regime_derisk_target_mult` of its current size on rebalance days.
     regime_derisk_below: Optional[str] = "CAUTIOUS"   # None to disable
     regime_derisk_target_mult: float = 0.5            # keep 50% of size in CAUTIOUS/BEAR
+    # ── Bear-market capital preservation knobs ─────────────────────────────
+    # Raise min_score bar in weak regimes (only A+ setups get through):
+    regime_min_score_bumps: dict = field(default_factory=lambda: {
+        "BULL": 0.0,
+        "NEUTRAL_BULL": 0.0,
+        "NEUTRAL": 5.0,
+        "CAUTIOUS": 10.0,
+        "BEAR": 20.0,
+    })
+    # Force a minimum cash level (% of equity) per regime label.
+    # Acts as a hard ceiling on gross equity exposure.
+    regime_cash_floor: dict = field(default_factory=lambda: {
+        "BULL": 0.0,
+        "NEUTRAL_BULL": 0.0,
+        "NEUTRAL": 0.10,
+        "CAUTIOUS": 0.30,
+        "BEAR": 0.60,
+    })
+    # Tighten the per-position hard stop in weak regimes (multiplier on
+    # configured hard_stop_pct; 1.0 = no change, 0.5 = half the loss tolerance).
+    regime_stop_tighten: dict = field(default_factory=lambda: {
+        "BULL": 1.0,
+        "NEUTRAL_BULL": 1.0,
+        "NEUTRAL": 0.85,
+        "CAUTIOUS": 0.65,
+        "BEAR": 0.50,
+    })
     # Shock-day stop suppression: if VIX day-over-day jumps >= shock_vix_jump
     # AND the broad index drops <= shock_index_drop on the same day, treat
     # it as a panic day and skip soft stop-loss exits (still honours deep
@@ -61,6 +88,12 @@ class BacktestConfig:
     shock_vix_jump: float = 0.30               # +30% one-day VIX jump
     shock_index_drop: float = -0.03            # -3% one-day index drop
     weights: Optional[dict] = None              # per-run override of SCORE_WEIGHTS (None = use config)
+    # ── SIP (Systematic Investment Plan) ────────────────────────────────────
+    # When sip_amount > 0: inject `sip_amount` cash on the first trading day
+    # at/after `sip_day_of_month` each calendar month. Sell proceeds still
+    # recycle into the cash pool (no change to existing reinvestment logic).
+    sip_amount: float = 0.0                     # 0 disables SIP (lumpsum mode)
+    sip_day_of_month: int = 13
 
     @property
     def cost_per_side(self) -> float:
@@ -86,6 +119,14 @@ class BTTrade:
     pnl_pct: float = 0.0
     days_held: int = 0
     score_at_entry: float = 0.0
+    # ── Entry-context diagnostics (populated on BUY only) ───────────────
+    pct_above_sma200_at_entry: float = 0.0    # extension above 200DMA
+    pct_from_52w_high_at_entry: float = 0.0   # negative; 0 = at high
+    rsi_at_entry: float = 0.0
+    ret_3m_at_entry: float = 0.0
+    ret_6m_at_entry: float = 0.0
+    ret_1y_at_entry: float = 0.0
+    regime_label_at_entry: str = ""
 
 
 @dataclass
@@ -95,6 +136,7 @@ class EquityPoint:
     market_value: float
     total: float
     n_open: int
+    contribution: float = 0.0   # cash injected on this date (SIP), 0 otherwise
 
 
 @dataclass
@@ -107,6 +149,9 @@ class BacktestResult:
     universe_size: int = 0
     start: str = ""
     end: str = ""
+    # SIP cash flows: list of (date, amount) including initial seed.
+    # Used by reporter for XIRR + benchmark SIP replay.
+    contributions: list[tuple[pd.Timestamp, float]] = field(default_factory=list)
 
 
 # ── The engine ───────────────────────────────────────────────────────────────
@@ -134,6 +179,9 @@ class BacktestEngine:
         self.positions: dict[str, Position] = {}
         self.trades: list[BTTrade] = []
         self.equity_curve: list[EquityPoint] = []
+        # SIP state
+        self.contributions: list[tuple[pd.Timestamp, float]] = []
+        self._sip_paid_months: set[tuple[int, int]] = set()  # (year, month) keys
 
         # Regime cache: avoid recomputing every rebalance
         self._regime_cache: dict[tuple[pd.Timestamp, str], regime_mod.HistoricalRegime] = {}
@@ -148,11 +196,29 @@ class BacktestEngine:
         log.info("Backtest: %s → %s, %d days, %d symbols, capital ₹%s",
                  dates[0].date(), dates[-1].date(), len(dates),
                  len(self.data), f"{self.cfg.initial_capital:,.0f}")
+        if self.cfg.sip_amount > 0:
+            log.info("SIP enabled: ₹%s/month on day %d (or next trading day)",
+                     f"{self.cfg.sip_amount:,.0f}", self.cfg.sip_day_of_month)
+
+        # Record initial seed (if any) as a t0 cash flow for XIRR
+        if self.cfg.initial_capital > 0:
+            self.contributions.append((dates[0], float(self.cfg.initial_capital)))
 
         rebalance_dates = set(dates[::self.cfg.rebalance_freq_days])
         rebalance_dates.add(dates[-1])  # always close on last day
 
         for asof in tqdm(dates, desc="Simulating"):
+            # 0) SIP injection: first trading day of month at/after sip_day
+            sip_amount_today = 0.0
+            if self.cfg.sip_amount > 0:
+                month_key = (asof.year, asof.month)
+                if (month_key not in self._sip_paid_months
+                        and asof.day >= self.cfg.sip_day_of_month):
+                    self.cash += self.cfg.sip_amount
+                    sip_amount_today = self.cfg.sip_amount
+                    self.contributions.append((asof, float(self.cfg.sip_amount)))
+                    self._sip_paid_months.add(month_key)
+
             # 1) Update prices on all open positions, update peaks
             current_prices = self._current_prices(asof)
             for sym, pos in list(self.positions.items()):
@@ -181,6 +247,7 @@ class BacktestEngine:
                 total=self.cash + mv,
                 n_open=sum(1 for p in self.positions.values()
                            if p.status != PositionStatus.CLOSED),
+                contribution=sip_amount_today,
             ))
 
         # 5) Force close remaining positions at end
@@ -204,6 +271,7 @@ class BacktestEngine:
             universe_size=len(self.data),
             start=str(dates[0].date()),
             end=str(dates[-1].date()),
+            contributions=self.contributions,
         )
 
     # ── Internals ────────────────────────────────────────────────────────────
@@ -272,6 +340,34 @@ class BacktestEngine:
         except ValueError:
             return False
         return cur <= floor
+
+    def _worst_regime_label(self) -> str:
+        """Most defensive regime label across markets (BEAR > CAUTIOUS > ...)."""
+        if not self.cfg.use_regime or not self._current_regime:
+            return "BULL"
+        order = ["BEAR", "CAUTIOUS", "NEUTRAL", "NEUTRAL_BULL", "BULL"]
+        worst_idx = len(order) - 1
+        for r in self._current_regime.values():
+            try:
+                worst_idx = min(worst_idx, order.index(r.label))
+            except ValueError:
+                continue
+        return order[worst_idx]
+
+    def _regime_min_score(self) -> float:
+        """min_score bumped up by regime weakness."""
+        bump = self.cfg.regime_min_score_bumps.get(self._worst_regime_label(), 0.0)
+        return self.cfg.min_score + bump
+
+    def _regime_cash_floor_frac(self) -> float:
+        """Required cash as % of equity given current regime."""
+        return self.cfg.regime_cash_floor.get(self._worst_regime_label(), 0.0)
+
+    def _regime_stop_mult(self, market: str) -> float:
+        r = self._current_regime.get(market)
+        if r is None:
+            return 1.0
+        return self.cfg.regime_stop_tighten.get(r.label, 1.0)
 
     def _apply_regime_derisk(self, asof: pd.Timestamp,
                               current_prices: dict[str, float]) -> None:
@@ -390,7 +486,9 @@ class BacktestEngine:
                     s.adjusted_score = s.score
 
         # Filter on adjusted_score so the backtest matches the live ranking.
-        scores = [s for s in scores if s.adjusted_score >= self.cfg.min_score]
+        # Min score is bumped up in weak regimes (capital preservation):
+        effective_min_score = self._regime_min_score()
+        scores = [s for s in scores if s.adjusted_score >= effective_min_score]
         if not scores:
             return
         scores.sort(key=lambda s: s.adjusted_score, reverse=True)
@@ -403,10 +501,18 @@ class BacktestEngine:
         # position count AND idle cash. After a T1/T2 fires, n_open stays
         # the same but cash rises — we still allow new entries via hard_cap.
         slots = hard_cap - n_open
+
+        # Regime cash floor: required cash reserve as % of equity.
+        # Stops new entries from breaching the floor (capital preservation).
+        regime_cash_required = equity * self._regime_cash_floor_frac()
+
         for s in scores:
             if slots <= 0:
                 break
             if self.cash <= cash_floor:
+                break
+            # Don't deploy below regime cash floor
+            if self.cash <= regime_cash_required:
                 break
             # Concentration checks
             if sector_weights.get(s.sector, 0.0) >= self.cfg.max_sector_weight:
@@ -428,8 +534,10 @@ class BacktestEngine:
 
             if target_rupees < equity * 0.02:    # too small to bother
                 continue
-            if target_rupees > self.cash * 0.95:  # not enough cash
-                target_rupees = self.cash * 0.95
+            # Cap by available cash above regime floor
+            deployable_cash = max(self.cash - regime_cash_required, 0.0)
+            if target_rupees > deployable_cash * 0.95:
+                target_rupees = deployable_cash * 0.95
             if target_rupees < equity * 0.02:
                 continue
 
@@ -455,8 +563,20 @@ class BacktestEngine:
             atr=s.atr_value, sector=s.sector, market=s.market,
             score=s.adjusted_score, entry_date=asof.strftime("%Y-%m-%d"),
         )
+        # Tighten stop in weak regimes: pull stop closer to entry by the
+        # regime stop multiplier. Multiplier < 1.0 means a tighter stop
+        # (smaller loss tolerance) when regime is degraded.
+        stop_mult = self._regime_stop_mult(s.market)
+        if stop_mult < 1.0 and pos.stop_price and pos.stop_price < s.price:
+            loss_dist = s.price - pos.stop_price
+            new_stop = s.price - loss_dist * stop_mult
+            pos.stop_price = new_stop
         self.positions[s.symbol] = pos
         self.cash -= cost
+        regime_label = ""
+        r = self._current_regime.get(s.market)
+        if r is not None:
+            regime_label = r.label
         self.trades.append(BTTrade(
             symbol=s.symbol, action="BUY", qty=qty, price=s.price,
             gross_value=s.price * qty,
@@ -466,6 +586,13 @@ class BacktestEngine:
             sector=s.sector, market=s.market,
             reason=f"adj={s.adjusted_score:.1f} (raw={s.score:.1f})",
             score_at_entry=s.adjusted_score,
+            pct_above_sma200_at_entry=float(s.technical.get("pct_above_sma200", 0.0) or 0.0),
+            pct_from_52w_high_at_entry=float(s.technical.get("pct_from_52w_high", 0.0) or 0.0),
+            rsi_at_entry=float(s.technical.get("rsi", 0.0) or 0.0),
+            ret_3m_at_entry=float(s.momentum.get("ret_3m", 0.0) or 0.0),
+            ret_6m_at_entry=float(s.momentum.get("ret_6m", 0.0) or 0.0),
+            ret_1y_at_entry=float(s.momentum.get("ret_1y", 0.0) or 0.0),
+            regime_label_at_entry=regime_label,
         ))
 
     def _sector_weights(self, prices: dict[str, float], equity: float) -> dict[str, float]:

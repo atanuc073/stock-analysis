@@ -102,6 +102,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--regime-skip-below", default="BEAR",
                    choices=["BEAR", "CAUTIOUS", "NEUTRAL", "NEUTRAL_BULL", "BULL"],
                    help="Skip new entries when regime label ≤ this (default BEAR)")
+    p.add_argument("--sip-amount", type=float, default=0.0,
+                   help="SIP amount per month (₹). 0 = lumpsum mode (default)")
+    p.add_argument("--sip-day", type=int, default=13,
+                   help="Day of month to inject SIP (default 13). Falls to next "
+                        "trading day if non-trading.")
     args = p.parse_args(argv)
 
     output_dir = Path(args.output_dir) if args.output_dir else REPORTS_DIR / "backtest"
@@ -133,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
         live_weights=not args.legacy_weights,
         use_regime=not args.no_regime,
         regime_skip_below=args.regime_skip_below,
+        sip_amount=args.sip_amount,
+        sip_day_of_month=args.sip_day,
     )
 
     # Pre-load benchmarks (also used as regime input)
@@ -183,18 +190,27 @@ def main(argv: list[str] | None = None) -> int:
     md_path = output_dir / f"{base}.md"
     png_path = output_dir / f"{base}.png"
 
-    write_excel(result, stats, benchmarks, excel_path)
-    write_markdown(result, stats, md_path)
+    write_excel(result, stats, benchmarks, excel_path, data=data)
+    write_markdown(result, stats, md_path, data=data)
     write_chart(result, benchmarks, png_path)
 
     # 7) Console summary
     print("\n" + "=" * 70)
     print(f"BACKTEST COMPLETE — {result.start} → {result.end}")
     print("=" * 70)
-    print(f"Initial Capital   : ₹{stats.initial_capital:,.0f}")
-    print(f"Final Equity      : ₹{stats.final_equity:,.0f}")
-    print(f"Total Return      : {stats.total_return_pct:+.2f}%")
-    print(f"CAGR              : {stats.cagr_pct:+.2f}%")
+    sip_active = bool(result.contributions) and result.config.sip_amount > 0
+    if sip_active:
+        print(f"Mode              : SIP ₹{result.config.sip_amount:,.0f}/month (day {result.config.sip_day_of_month})")
+        print(f"Total Invested    : ₹{stats.total_invested:,.0f}  ({stats.n_contributions} contributions)")
+        print(f"Final Equity      : ₹{stats.final_equity:,.0f}")
+        print(f"Total Return      : {stats.total_return_pct:+.2f}%")
+        print(f"XIRR (annualized) : {stats.xirr_pct:+.2f}%")
+    else:
+        print(f"Mode              : Lumpsum")
+        print(f"Initial Capital   : ₹{stats.initial_capital:,.0f}")
+        print(f"Final Equity      : ₹{stats.final_equity:,.0f}")
+        print(f"Total Return      : {stats.total_return_pct:+.2f}%")
+        print(f"CAGR              : {stats.cagr_pct:+.2f}%")
     print(f"Max Drawdown      : {stats.max_drawdown_pct:.2f}%")
     print(f"Sharpe Ratio      : {stats.sharpe_ratio:.2f}")
     print(f"Win Rate          : {stats.win_rate_pct:.1f}%  ({stats.closed_trades} trades)")

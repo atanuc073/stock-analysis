@@ -2,6 +2,7 @@
 from __future__ import annotations
 import logging
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -11,14 +12,17 @@ from .results import (
     PerformanceStats,
     yearly_breakdown,
     benchmark_buy_and_hold,
+    benchmark_sip,
     score_calibration,
+    top_chase_diagnostic,
 )
 
 log = logging.getLogger(__name__)
 
 
 def write_excel(result: BacktestResult, stats: PerformanceStats,
-                benchmarks: dict[str, pd.Series], path: Path) -> None:
+                benchmarks: dict[str, pd.Series], path: Path,
+                data: Optional[dict] = None) -> None:
     """Multi-sheet Excel with summary, trades, equity curve, yearly P&L."""
     eq_df = pd.DataFrame([
         {"Date": p.date, "Equity": p.total, "Cash": p.cash,
@@ -37,13 +41,25 @@ def write_excel(result: BacktestResult, stats: PerformanceStats,
         for t in result.trades
     ])
 
+    sip_active = bool(result.contributions) and result.config.sip_amount > 0
     summary_rows = [
         ("Period", f"{result.start} → {result.end}"),
         ("Years", f"{stats.years:.2f}"),
+        ("Mode", "SIP" if sip_active else "Lumpsum"),
         ("Initial Capital", f"₹{stats.initial_capital:,.0f}"),
+    ]
+    if sip_active:
+        summary_rows += [
+            ("SIP Amount/Month", f"₹{result.config.sip_amount:,.0f}"),
+            ("SIP Day", result.config.sip_day_of_month),
+            ("Total Contributions", stats.n_contributions),
+            ("Total Invested", f"₹{stats.total_invested:,.0f}"),
+        ]
+    summary_rows += [
         ("Final Equity", f"₹{stats.final_equity:,.0f}"),
         ("Total Return", f"{stats.total_return_pct:+.2f}%"),
-        ("CAGR", f"{stats.cagr_pct:+.2f}%"),
+        ("CAGR" if not sip_active else "XIRR (annualized)",
+         f"{stats.cagr_pct:+.2f}%"),
         ("", ""),
         ("RISK", ""),
         ("Max Drawdown", f"{stats.max_drawdown_pct:.2f}%"),
@@ -105,6 +121,21 @@ def write_excel(result: BacktestResult, stats: PerformanceStats,
         calib = score_calibration(result)
         if not calib.empty:
             calib.to_excel(w, sheet_name="Score_Calibration", index=False)
+        # Top-chase diagnostic (only if historical data is provided)
+        if data is not None:
+            tc = top_chase_diagnostic(result, data)
+            if not tc["trades"].empty:
+                tc["trades"].to_excel(w, sheet_name="TopChase_Trades", index=False)
+            if not tc["buckets_extension"].empty:
+                tc["buckets_extension"].to_excel(w, sheet_name="TopChase_By_Extension", index=False)
+            if not tc["buckets_52w"].empty:
+                tc["buckets_52w"].to_excel(w, sheet_name="TopChase_By_52wHigh", index=False)
+            if tc["summary"]:
+                summ_df = pd.DataFrame(
+                    [(k, v) for k, v in tc["summary"].items()],
+                    columns=["Metric", "Value"],
+                )
+                summ_df.to_excel(w, sheet_name="TopChase_Summary", index=False)
         if not trades_df.empty:
             trades_df.to_excel(w, sheet_name="All_Trades", index=False)
 
@@ -138,7 +169,8 @@ def _format_excel(path: Path) -> None:
     wb.save(path)
 
 
-def write_markdown(result: BacktestResult, stats: PerformanceStats, path: Path) -> None:
+def write_markdown(result: BacktestResult, stats: PerformanceStats, path: Path,
+                    data: Optional[dict] = None) -> None:
     L: list[str] = []
     L.append(f"# Backtest Report — {result.start} → {result.end}\n")
     L.append(f"**Universe:** {result.universe_size} symbols  ")
@@ -148,12 +180,21 @@ def write_markdown(result: BacktestResult, stats: PerformanceStats, path: Path) 
     L.append(f"**Transaction costs:** {result.config.transaction_cost_bps + result.config.slippage_bps:.0f} bps round-trip\n")
 
     L.append("## 📈 Performance\n")
+    sip_active = bool(result.contributions) and result.config.sip_amount > 0
     L.append("| Metric | Value |")
     L.append("|---|---|")
+    L.append(f"| Mode | {'SIP' if sip_active else 'Lumpsum'} |")
     L.append(f"| Initial Capital | ₹{stats.initial_capital:,.0f} |")
+    if sip_active:
+        L.append(f"| SIP Amount/Month | ₹{result.config.sip_amount:,.0f} (day {result.config.sip_day_of_month}) |")
+        L.append(f"| Total Contributions | {stats.n_contributions} |")
+        L.append(f"| **Total Invested** | **₹{stats.total_invested:,.0f}** |")
     L.append(f"| Final Equity | ₹{stats.final_equity:,.0f} |")
     L.append(f"| **Total Return** | **{stats.total_return_pct:+.2f}%** |")
-    L.append(f"| **CAGR** | **{stats.cagr_pct:+.2f}%** |")
+    if sip_active:
+        L.append(f"| **XIRR (annualized)** | **{stats.xirr_pct:+.2f}%** |")
+    else:
+        L.append(f"| **CAGR** | **{stats.cagr_pct:+.2f}%** |")
     L.append(f"| Years | {stats.years:.2f} |")
 
     L.append("\n## ⚠️ Risk\n")
@@ -218,6 +259,28 @@ def write_markdown(result: BacktestResult, stats: PerformanceStats, path: Path) 
                  "threshold — consider lowering `min_score` or re-weighting components.\n")
         L.append(calib.to_markdown(index=False))
 
+    # Top-chase diagnostic — are we buying near tops?
+    if data is not None:
+        tc = top_chase_diagnostic(result, data)
+        summ = tc.get("summary") or {}
+        if summ:
+            L.append("\n## 🔍 Top-Chase Diagnostic (are we buying near tops?)\n")
+            L.append("Empirical check: for every BUY, what was the entry context, "
+                     "and what did the stock do over the next 30/90 days?\n")
+            L.append("### Summary\n")
+            L.append("| Indicator | Value |")
+            L.append("|---|---|")
+            for k, v in summ.items():
+                L.append(f"| {k} | {v} |")
+            if not tc["buckets_extension"].empty:
+                L.append("\n### Forward returns by extension above 200DMA\n")
+                L.append("_If `Avg_Fwd30` declines as extension grows, you're chasing tops._\n")
+                L.append(tc["buckets_extension"].to_markdown(index=False))
+            if not tc["buckets_52w"].empty:
+                L.append("\n### Forward returns by distance from 52-week high\n")
+                L.append("_Pullback buckets should outperform near-high buckets._\n")
+                L.append(tc["buckets_52w"].to_markdown(index=False))
+
     # Verdict
     L.append("\n## 🎯 Verdict\n")
     if stats.cagr_pct >= 15 and stats.max_drawdown_pct >= -25 and stats.sharpe_ratio >= 1.0:
@@ -255,14 +318,22 @@ def write_chart(result: BacktestResult, benchmarks: dict[str, pd.Series], path: 
              linewidth=2.0, color="#1F4E78")
 
     # Benchmarks
+    sip_active = bool(result.contributions) and result.config.sip_amount > 0
     for name, series in benchmarks.items():
         if series is None or series.empty:
             continue
-        bench = benchmark_buy_and_hold(series, result.config.initial_capital)
+        if sip_active:
+            bench = benchmark_sip(series, result.contributions)
+            label = f"{name} (SIP)"
+        else:
+            bench = benchmark_buy_and_hold(series, result.config.initial_capital)
+            label = name
+        if bench.empty:
+            continue
         bench = bench.resample("D").last().ffill()
         # align
         bench = bench.reindex(daily.index, method="ffill")
-        ax1.plot(bench.index, bench.values, label=name,
+        ax1.plot(bench.index, bench.values, label=label,
                  linewidth=1.0, alpha=0.7, linestyle="--")
 
     ax1.set_title(f"Equity Curve — {result.start} → {result.end}",
