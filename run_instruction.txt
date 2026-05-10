@@ -30,7 +30,7 @@ python -m backtest.cli --start 2020-01-01 --end 2025-01-01 --universe broad
 
 
 # Pure SIP: ₹50,000 every 13th of month, no initial seed
-python -m backtest.cli --start 2020-01-01 --end 2024-12-31 `
+.\.venv\Scripts\python.exe -m backtest.cli --start 2020-01-01 --end 2024-12-31 `
     --capital 0 --sip-amount 50000 --sip-day 13
 
 # Hybrid: ₹1L seed + ₹50K monthly SIP
@@ -44,6 +44,6 @@ python -m backtest.cli --start 2020-01-01 --end 2024-12-31 --capital 1000000
 # Historical "what-if" runner — pick a past date, see what the system would
 # have suggested using only data available then, and how those picks performed
 # at +1 week / +1 month / +3 months. Forecast uses Prophet.
-.\.venv\Scripts\python.exe historical_runner.py --date 2024-01-15 --mode russell1000 --top 10
-.\.venv\Scripts\python.exe historical_runner.py --date 2023-06-01 --mode nifty500 --top 15
-.\.venv\Scripts\python.exe historical_runner.py                # defaults: today, russell1000, top 10
+.\.venv\Scripts\python.exe historical_runner.py --date 2024-01-15 --mode broad --top 10
+.\.venv\Scripts\python.exe historical_runner.py --date 2023-06-01 --mode broad --top 15
+.\.venv\Scripts\python.exe historical_runner.py                # defaults: today, broad, top 10
