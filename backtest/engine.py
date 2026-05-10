@@ -656,27 +656,47 @@ class BacktestEngine:
                 continue
 
             current_score: Optional[float] = None
-            if evaluate_thesis:
-                hd = self.data.get(sym)
-                if hd:
-                    s = score_at(hd, asof,
-                                 include_forecast=False,
-                                 live_weights=self.cfg.live_weights,
-                                 weights_override=self.cfg.weights)
-                    if s:
-                        # Use raw composite for thesis-break (cross-sectional
-                        # context is unavailable for a single ticker on exit).
-                        current_score = s.score
+            hist_slice = None
+            hd = self.data.get(sym)
+            if hd is not None:
+                try:
+                    hist_slice = hd.history.loc[:asof]
+                except Exception:
+                    hist_slice = None
+            if evaluate_thesis and hd is not None:
+                s = score_at(hd, asof,
+                             include_forecast=False,
+                             live_weights=self.cfg.live_weights,
+                             weights_override=self.cfg.weights)
+                if s:
+                    # Use raw composite for thesis-break (cross-sectional
+                    # context is unavailable for a single ticker on exit).
+                    current_score = s.score
 
             signals = self.exit_eval.evaluate(
                 pos, cp, current_score=current_score, red_flags=0,
                 today=asof.date(), regime_shock=regime_shock,
+                history=hist_slice,
             )
             for sig in signals:
                 self._execute_exit(pos, sig, asof)
 
     def _execute_exit(self, pos: Position, sig, asof: pd.Timestamp) -> None:
         qty = min(sig.suggested_qty, pos.qty_open)
+
+        # Adaptive-tier no-sell path: tier triggered, but strength score said
+        # "hold full". Mark tier as triggered + raise stop without selling.
+        if qty <= 0 and sig.exit_type in (ExitType.TIER_1, ExitType.TIER_2):
+            tier_idx = 0 if sig.exit_type == ExitType.TIER_1 else 1
+            if tier_idx < len(pos.tiers):
+                t = pos.tiers[tier_idx]
+                t.triggered = True
+                t.triggered_on = asof.isoformat()
+                t.fill_price = sig.current_price
+            if sig.new_stop_price is not None and sig.new_stop_price > pos.stop_price:
+                pos.stop_price = sig.new_stop_price
+            return
+
         if qty <= 0:
             return
         gross = sig.current_price * qty

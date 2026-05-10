@@ -21,6 +21,7 @@ DEFAULT_TIME_STOP_BAND = (-0.05, 0.10)  # if return between -5% and +10% at time
 DEFAULT_THESIS_BREAK_SCORE = 50.0
 DEFAULT_STOP_CONFIRM_BARS = 2  # close ≤ stop on N consecutive bars before firing
 DEFAULT_HARD_STOP_BUFFER = 0.025  # if price < hard_stop * (1 - this), fire immediately
+DEFAULT_ADAPTIVE_TIERS = True   # re-evaluate strength at each tier and adapt sell size
 
 
 # ── Position factory ─────────────────────────────────────────────────────────
@@ -103,6 +104,12 @@ class ExitConfig:
     # Even with confirmation, fire immediately if price collapses well below
     # the stop on a single bar (real breakdown, not noise).
     hard_stop_buffer: float = DEFAULT_HARD_STOP_BUFFER
+    # When True, re-score the position's trend strength when a tier triggers
+    # and adapt the sell fraction:
+    #   3/3 strong  -> hold full position, raise stop only
+    #   2/3 mixed   -> default tier behaviour
+    #   0-1/3 weak  -> sell more aggressively + tighter stop
+    adaptive_tiers: bool = DEFAULT_ADAPTIVE_TIERS
 
 
 class ExitEvaluator:
@@ -123,6 +130,7 @@ class ExitEvaluator:
         red_flags: int = 0,
         today: Optional[date] = None,
         regime_shock: bool = False,
+        history=None,
     ) -> list[ExitSignal]:
         """Return zero or more exit signals. Tiers stack; stops short-circuit.
 
@@ -174,18 +182,45 @@ class ExitEvaluator:
                 continue
             target_price = position.entry_price * (1 + tier.pct_gain)
             if current_price >= target_price:
-                qty_to_sell = round(position.qty_original * tier.sell_fraction, 4)
+                # Default behaviour
+                sell_frac = tier.sell_fraction
+                new_stop_pct = tier.new_stop_pct
+                strength_label = ""
+
+                # Adaptive: re-score trend and adjust sell size
+                if self.cfg.adaptive_tiers and history is not None:
+                    strength = self._tier_strength(history, current_price)
+                    if strength >= 3:
+                        # All 3 trend signals positive — hold full size, just raise stop
+                        sell_frac = 0.0
+                        # Keep at least breakeven for T1, +15% for T2
+                        floor = 0.0 if idx == 0 else 0.15
+                        new_stop_pct = max(tier.new_stop_pct or 0.0, floor)
+                        strength_label = " [strong 3/3 — hold]"
+                    elif strength <= 1:
+                        # Weakening — take more off, tighten stop
+                        sell_frac = min(0.6, tier.sell_fraction * 1.5)
+                        # Lock in roughly half the gain so far
+                        new_stop_pct = max(
+                            tier.new_stop_pct or 0.0,
+                            tier.pct_gain * 0.5,
+                        )
+                        strength_label = f" [weak {strength}/3 — trim more]"
+                    else:
+                        strength_label = " [mixed 2/3 — default]"
+
+                qty_to_sell = round(position.qty_original * sell_frac, 4)
                 qty_to_sell = min(qty_to_sell, position.qty_open)
                 new_stop = (
-                    position.entry_price * (1 + (tier.new_stop_pct or 0.0))
-                    if tier.new_stop_pct is not None else None
+                    position.entry_price * (1 + (new_stop_pct or 0.0))
+                    if new_stop_pct is not None else None
                 )
                 signals.append(ExitSignal(
                     symbol=position.symbol,
                     exit_type=ExitType.TIER_1 if idx == 0 else ExitType.TIER_2,
                     suggested_qty=qty_to_sell,
                     current_price=current_price,
-                    reason=f"+{tier.pct_gain*100:.0f}% target hit",
+                    reason=f"+{tier.pct_gain*100:.0f}% target hit{strength_label}",
                     new_stop_price=new_stop,
                     pnl_pct=(current_price / position.entry_price - 1) * 100,
                     pnl_abs=(current_price - position.entry_price) * qty_to_sell,
@@ -234,3 +269,55 @@ class ExitEvaluator:
     def update_peak(position: Position, current_price: float) -> None:
         if current_price > position.peak_price:
             position.peak_price = current_price
+
+    @staticmethod
+    def _tier_strength(history, current_price: float) -> int:
+        """Score the trend's remaining-room on a 0-3 scale.
+
+        Three independent signals (each 0 or 1):
+          1. Trend health    : close > SMA50 AND SMA50 > SMA200
+          2. Momentum        : 1M return > 0 AND 3M return > 0
+          3. Not parabolic   : RSI(14) < 75 AND price < SMA50 * 1.25
+
+        `history` is an OHLCV DataFrame containing all bars up to and including
+        the evaluation day (no look-ahead). Returns 2 (neutral) if data is
+        insufficient so the default tier behaviour applies.
+        """
+        try:
+            close = history["Close"]
+        except (KeyError, TypeError, AttributeError):
+            return 2
+        n = len(close)
+        if n < 60:
+            return 2
+
+        score = 0
+
+        # Signal 1 — trend
+        sma50 = close.tail(50).mean()
+        sma200 = close.tail(200).mean() if n >= 200 else sma50
+        if current_price > sma50 and sma50 > sma200:
+            score += 1
+
+        # Signal 2 — momentum (1M ~ 21 trading days, 3M ~ 63)
+        try:
+            ret_1m = current_price / close.iloc[-21] - 1
+            ret_3m = current_price / close.iloc[-63] - 1 if n >= 63 else ret_1m
+            if ret_1m > 0 and ret_3m > 0:
+                score += 1
+        except (IndexError, ZeroDivisionError):
+            pass
+
+        # Signal 3 — not parabolic
+        try:
+            delta = close.diff().tail(15)
+            up = delta.clip(lower=0).mean()
+            down = (-delta.clip(upper=0)).mean()
+            rsi = 100.0 if down == 0 else 100 - 100 / (1 + up / down)
+            extension = current_price / sma50 - 1 if sma50 else 0.0
+            if rsi < 75 and extension < 0.25:
+                score += 1
+        except Exception:
+            pass
+
+        return score
