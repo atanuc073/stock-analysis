@@ -39,3 +39,11 @@ python -m backtest.cli --start 2020-01-01 --end 2024-12-31 `
 
 # Old lumpsum mode still works (sip_amount defaults to 0)
 python -m backtest.cli --start 2020-01-01 --end 2024-12-31 --capital 1000000
+
+
+# Historical "what-if" runner — pick a past date, see what the system would
+# have suggested using only data available then, and how those picks performed
+# at +1 week / +1 month / +3 months. Forecast uses Prophet.
+.\.venv\Scripts\python.exe historical_runner.py --date 2024-01-15 --mode russell1000 --top 10
+.\.venv\Scripts\python.exe historical_runner.py --date 2023-06-01 --mode nifty500 --top 15
+.\.venv\Scripts\python.exe historical_runner.py                # defaults: today, russell1000, top 10
