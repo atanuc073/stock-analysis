@@ -49,6 +49,11 @@ class BacktestConfig:
     use_regime: bool = True                     # enable market regime filter
     regime_skip_below: str = "BEAR"            # skip entries at or below this regime
     regime_check_freq_days: int = 5            # re-evaluate regime every N days
+    # Regime-driven de-risking of OPEN positions (not just new entries):
+    # When regime label is at or below this floor, trim each open position
+    # toward `regime_derisk_target_mult` of its current size on rebalance days.
+    regime_derisk_below: Optional[str] = "CAUTIOUS"   # None to disable
+    regime_derisk_target_mult: float = 0.5            # keep 50% of size in CAUTIOUS/BEAR
     # Shock-day stop suppression: if VIX day-over-day jumps >= shock_vix_jump
     # AND the broad index drops <= shock_index_drop on the same day, treat
     # it as a panic day and skip soft stop-loss exits (still honours deep
@@ -253,6 +258,79 @@ class BacktestEngine:
             return False
         return cur <= floor
 
+    def _regime_should_derisk(self, market: str) -> bool:
+        """True when current regime warrants trimming OPEN positions."""
+        if not self.cfg.use_regime or self.cfg.regime_derisk_below is None:
+            return False
+        r = self._current_regime.get(market)
+        if r is None:
+            return False
+        order = ["BEAR", "CAUTIOUS", "NEUTRAL", "NEUTRAL_BULL", "BULL"]
+        try:
+            cur = order.index(r.label)
+            floor = order.index(self.cfg.regime_derisk_below)
+        except ValueError:
+            return False
+        return cur <= floor
+
+    def _apply_regime_derisk(self, asof: pd.Timestamp,
+                              current_prices: dict[str, float]) -> None:
+        """Trim open positions when regime label drops to/below derisk floor.
+
+        Sells down each affected position to `regime_derisk_target_mult` of
+        its current size. Idempotent: once trimmed, won't keep selling
+        further unless regime degrades again or position grows back.
+        """
+        if not self.cfg.use_regime or self.cfg.regime_derisk_below is None:
+            return
+        target_mult = self.cfg.regime_derisk_target_mult
+        if target_mult >= 1.0 or target_mult < 0.0:
+            return
+        for sym, pos in list(self.positions.items()):
+            if pos.status == PositionStatus.CLOSED or pos.qty_open <= 0:
+                continue
+            if not self._regime_should_derisk(pos.market):
+                continue
+            cp = current_prices.get(sym)
+            if cp is None or cp <= 0:
+                continue
+            target_qty = pos.qty_original * target_mult
+            trim_qty = pos.qty_open - target_qty
+            if trim_qty <= max(pos.qty_original * 0.05, 1e-6):
+                continue  # already at/below target
+            gross = cp * trim_qty
+            cost = gross * self.cfg.cost_per_side
+            net = gross - cost
+            pnl_abs = (cp - pos.entry_price) * trim_qty
+            pnl_pct = (cp / pos.entry_price - 1) * 100
+            try:
+                entry_dt = date.fromisoformat(pos.entry_date)
+            except Exception:
+                entry_dt = asof.date()
+            days_held = (asof.date() - entry_dt).days
+
+            self.cash += net
+            pos.qty_open -= trim_qty
+            pos.realized_pnl += pnl_abs
+            if pos.qty_open <= 1e-6:
+                pos.status = PositionStatus.CLOSED
+            else:
+                pos.status = PositionStatus.PARTIALLY_CLOSED
+
+            r = self._current_regime.get(pos.market)
+            label = r.label if r else "?"
+            self.trades.append(BTTrade(
+                symbol=pos.symbol, action="SELL", qty=trim_qty, price=cp,
+                gross_value=gross, cost=cost, net_value=net,
+                timestamp=asof.isoformat(),
+                sector=pos.sector, market=pos.market,
+                reason=f"REGIME_DERISK ({label})",
+                exit_type="REGIME_DERISK",
+                pnl_abs=pnl_abs, pnl_pct=pnl_pct,
+                days_held=days_held,
+                score_at_entry=pos.score_at_entry,
+            ))
+
     # ── Entries ──────────────────────────────────────────────────────────────
     def _rebalance(self, asof: pd.Timestamp, current_prices: dict[str, float]) -> None:
         """Score universe, find candidates, open new positions.
@@ -263,6 +341,7 @@ class BacktestEngine:
         sat idle until the full position closed.
         """
         self._refresh_regime(asof)
+        self._apply_regime_derisk(asof, current_prices)
 
         equity = self.cash + self._market_value(current_prices)
         cash_floor = equity * 0.05  # don't bother if <5% deployable
