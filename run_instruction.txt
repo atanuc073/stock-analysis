@@ -26,3 +26,16 @@ python -m backtest.cli --start 2020-01-01 --end 2025-01-01 --universe broad
 # 3. Random search walk-forward (the gold standard)
 .\.venv\Scripts\python.exe -m backtest.optimize --start 2018-01-01 --end 2025-01-01 --candidates 80 --walk-forward
 
+
+
+
+# Pure SIP: ₹50,000 every 13th of month, no initial seed
+python -m backtest.cli --start 2020-01-01 --end 2024-12-31 `
+    --capital 0 --sip-amount 50000 --sip-day 13
+
+# Hybrid: ₹1L seed + ₹50K monthly SIP
+python -m backtest.cli --start 2020-01-01 --end 2024-12-31 `
+    --capital 100000 --sip-amount 50000 --sip-day 13
+
+# Old lumpsum mode still works (sip_amount defaults to 0)
+python -m backtest.cli --start 2020-01-01 --end 2024-12-31 --capital 1000000
