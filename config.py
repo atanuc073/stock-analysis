@@ -67,12 +67,12 @@ WATCHLIST = WATCHLIST_INDIA + WATCHLIST_US
 SCORE_WEIGHTS = {
     "technical":      0.13,
     "fundamental":    0.12,
-    "momentum":       0.25,
+    "momentum":       0.27,
     "sentiment":      0.04,
-    "forecast":       0.04,
+    "forecast":       0.00,   # disabled — see analysis/composite.py (compute skipped for speed)
     "options":        0.05,   # US only; auto-redistributed for IN tickers
-    "quality":        0.20,   # promoted — Novy-Marx GPA, FCF, accruals
-    "earnings_drift": 0.17,   # promoted — strongest non-momentum anomaly
+    "quality":        0.21,   # promoted — Novy-Marx GPA, FCF, accruals
+    "earnings_drift": 0.18,   # promoted — strongest non-momentum anomaly
     "valuation":      0.00,   # handled cross-sectionally (post-processor)
 }
 # Sanity check at import: weights MUST sum to 1.0 or backtest composites
@@ -85,3 +85,11 @@ assert abs(sum(SCORE_WEIGHTS.values()) - 1.0) < 1e-6, (
 RSI_OVERSOLD = 35
 RSI_OVERBOUGHT = 70
 VOLUME_SPIKE_MULT = 1.8  # today's volume vs 20-day avg
+
+# ── Top Picks sector diversification ─────────────────────────────────────────
+# Cap how many picks from a single sector can appear in the Top Picks list.
+# Prevents the late-cycle concentration problem where momentum+quality factors
+# both reward the same in-favor sector (e.g. Basic Materials + Energy). Set to
+# 0 or a value >= TOP_N to disable. Picks are still selected by score within
+# each sector — the cap only stops over-representation in the final list.
+TOP_PICKS_SECTOR_CAP = int(os.getenv("TOP_PICKS_SECTOR_CAP", "3"))

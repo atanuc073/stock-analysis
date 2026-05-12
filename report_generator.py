@@ -10,7 +10,7 @@ from openpyxl.styles import (
 )
 from openpyxl.utils import get_column_letter
 
-from config import REPORTS_DIR
+from config import REPORTS_DIR, TOP_PICKS_SECTOR_CAP
 
 
 def _fmt_money(v):
@@ -28,10 +28,44 @@ def _fmt_pct(v, signed=True):
     return f"{'+' if signed and v >= 0 else ''}{v:.2f}%"
 
 
+def _score_of(r) -> float:
+    """Prefer adjusted_score (cross-sectional pass) if present, else composite."""
+    return getattr(r, "adjusted_score", None) or getattr(r, "composite_score", 0.0)
+
+
+def _select_top_picks(reports: list, top_n: int, sector_cap: int = TOP_PICKS_SECTOR_CAP) -> list:
+    """Pick top-N by score with a per-sector cap to avoid sector concentration.
+
+    Walks the score-sorted list and adds each name unless its sector has
+    already reached `sector_cap` slots. Names skipped over are still kept as
+    overflow — if we can't fill `top_n` with the cap enforced (e.g. sparse
+    universe), the overflow is appended in score order to guarantee a full
+    list. `sector_cap <= 0` or `>= top_n` disables the cap.
+    """
+    sorted_rs = sorted(reports, key=_score_of, reverse=True)
+    if sector_cap <= 0 or sector_cap >= top_n:
+        return sorted_rs[:top_n]
+    picks: list = []
+    overflow: list = []
+    counts: dict[str, int] = {}
+    for r in sorted_rs:
+        sec = (getattr(r, "sector", "") or "Unknown")
+        if counts.get(sec, 0) < sector_cap:
+            picks.append(r)
+            counts[sec] = counts.get(sec, 0) + 1
+            if len(picks) >= top_n:
+                break
+        else:
+            overflow.append(r)
+    if len(picks) < top_n:
+        picks.extend(overflow[: top_n - len(picks)])
+    return picks
+
+
 def render_markdown(reports: list, top_n: int = 15) -> str:
     today = datetime.now().strftime("%Y-%m-%d")
-    sorted_rs = sorted(reports, key=lambda r: r.composite_score, reverse=True)
-    top = sorted_rs[:top_n]
+    sorted_rs = sorted(reports, key=_score_of, reverse=True)
+    top = _select_top_picks(reports, top_n)
     bottom = sorted_rs[-min(5, len(sorted_rs)):]
 
     lines = []
@@ -285,8 +319,8 @@ def _style_header_row(ws, row_num=1):
 def render_excel(reports: list, top_n: int = 15) -> Workbook:
     """Build a multi-sheet Excel workbook from StockReport list."""
     wb = Workbook()
-    sorted_rs = sorted(reports, key=lambda r: r.composite_score, reverse=True)
-    top = sorted_rs[:top_n]
+    sorted_rs = sorted(reports, key=_score_of, reverse=True)
+    top = _select_top_picks(reports, top_n)
     bottom = sorted_rs[-min(5, len(sorted_rs)):]
 
     # ── Sheet 1: Dashboard ──────────────────────────────────────────────
