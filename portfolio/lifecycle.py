@@ -56,12 +56,8 @@ class PositionFactory:
 
         atr_stop = entry_price - self.params.atr_stop_mult * max(atr, 0.0)
         hard_stop = entry_price * (1 - self.params.hard_stop_pct)
-        # Use the WIDER of ATR/hard (give the trade room), but never
-        # looser than the hard floor and never above entry.
-        # min(atr_stop, hard_stop) = lower price = wider stop.
-        wider = min(atr_stop, hard_stop)
-        # Floor at hard_stop so total risk is capped:
-        initial_stop = max(wider, hard_stop)
+        # Cap the total risk at the hard stop floor:
+        initial_stop = max(atr_stop, hard_stop)
         initial_stop = min(entry_price * 0.999, initial_stop)
 
         tiers = [

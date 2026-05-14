@@ -5,6 +5,7 @@ import pandas as pd
 import ta
 
 from config import RSI_OVERSOLD, RSI_OVERBOUGHT, VOLUME_SPIKE_MULT
+from analysis.indicators import atr
 
 
 def compute(df: pd.DataFrame) -> dict:
@@ -112,4 +113,5 @@ def compute(df: pd.DataFrame) -> dict:
         "in_base": bool(in_base),
         "extended_at_high": bool(extended_at_high),
         "volume_ratio": float(vol.iloc[last] / avg_vol_20) if avg_vol_20 else 1.0,
+        "atr": float(atr(df)) if len(df) >= 14 else 0.0,
     }

@@ -42,8 +42,8 @@ class BacktestConfig:
     base_position_weight: float = 0.10         # 10% of equity per new position
     max_position_weight: float = 0.15
     max_sector_weight: float = 0.30
-    transaction_cost_bps: float = 10.0         # 10 bps each side (0.10%)
-    slippage_bps: float = 5.0                  # 5 bps slippage
+    transaction_cost_bps: float = 0.0          # 0 bps each side (0.00%)
+    slippage_bps: float = 0.0                  # 0 bps slippage
     include_forecast: bool = False             # forecast slow; off by default
     live_weights: bool = True                   # use live SCORE_WEIGHTS (no redistribution)
     use_regime: bool = True                     # enable market regime filter

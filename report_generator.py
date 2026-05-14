@@ -74,14 +74,18 @@ def render_markdown(reports: list, top_n: int = 15) -> str:
 
     # Summary table
     lines.append("## Top Picks\n")
-    lines.append("| # | Ticker | Mkt | Name | Price | Score | Verdict | 1D | 1M | 3M | RSI | P/E | Sector |")
-    lines.append("|---|--------|-----|------|-------|-------|---------|------|------|------|-----|-----|--------|")
+    lines.append("| # | Ticker | Mkt | Name | Price | Stop | T1 (+22%) | Score | Verdict | 1D | 1M | 3M | RSI | P/E | Sector |")
+    lines.append("|---|--------|-----|------|-------|------|-----------|-------|---------|------|------|------|-----|-----|--------|")
     for i, r in enumerate(top, 1):
         pe_val = r.fundamental.get('pe')
         pe_str = f"{pe_val:.1f}" if isinstance(pe_val, float) else (pe_val or '—')
+        atr_val = r.technical.get('atr', 0.0)
+        atr_stop = r.price - 3.0 * atr_val if atr_val > 0 else r.price * 0.82
+        stop_price = max(atr_stop, r.price * 0.82)
+        t1_price = r.price * 1.22
         lines.append(
             f"| {i} | **{r.symbol}** | {r.market} | {(r.name or '')[:24]} | "
-            f"{r.price:.2f} | **{r.composite_score:.1f}** | {r.verdict} | "
+            f"{r.price:.2f} | {stop_price:.2f} | {t1_price:.2f} | **{r.composite_score:.1f}** | {r.verdict} | "
             f"{_fmt_pct(r.momentum.get('ret_1d'))} | "
             f"{_fmt_pct(r.momentum.get('ret_1m'))} | {_fmt_pct(r.momentum.get('ret_3m'))} | "
             f"{r.technical.get('rsi', 0):.0f} | "
@@ -91,8 +95,13 @@ def render_markdown(reports: list, top_n: int = 15) -> str:
 
     lines.append("\n## Detailed Analysis (Top Picks)\n")
     for r in top:
+        atr_val = r.technical.get('atr', 0.0)
+        atr_stop = r.price - 3.0 * atr_val if atr_val > 0 else r.price * 0.82
+        stop_price = max(atr_stop, r.price * 0.82)
+        stop_pct = (stop_price / r.price - 1) * 100 if r.price > 0 else -18.0
+        t1_price = r.price * 1.22
         lines.append(f"### {r.symbol} — {r.name} ({r.market})  →  **{r.verdict}** (score {r.composite_score:.1f})\n")
-        lines.append(f"- **Price:** {r.price:.2f}  |  **Sector:** {r.sector or '—'}  |  **Mkt Cap:** {_fmt_money(r.fundamental.get('market_cap'))}")
+        lines.append(f"- **Price:** {r.price:.2f}  |  **Stop:** {stop_price:.2f} ({stop_pct:.1f}%)  |  **T1:** {t1_price:.2f} (+22%)  |  **Sector:** {r.sector or '—'}  |  **Mkt Cap:** {_fmt_money(r.fundamental.get('market_cap'))}")
         lines.append(f"- **Returns:** 1D {_fmt_pct(r.momentum.get('ret_1d'))}, 1W {_fmt_pct(r.momentum.get('ret_1w'))}, 1M {_fmt_pct(r.momentum.get('ret_1m'))}, 3M {_fmt_pct(r.momentum.get('ret_3m'))}, 1Y {_fmt_pct(r.momentum.get('ret_1y'))}")
         lines.append(f"- **Technical:** RSI {r.technical.get('rsi', 0):.1f} | Above 50DMA: {r.technical.get('above_sma50')} | Above 200DMA: {r.technical.get('above_sma200')} | {_fmt_pct(r.technical.get('pct_from_52w_high'), False)} from 52W high")
         f = r.fundamental
@@ -236,9 +245,12 @@ def _swing_setup(r) -> dict | None:
         return None
 
     # ── Targets / stops (90-day horizon) ─────────────────────────────
-    # Stop: max of (SMA50-style 7% below) or ATR-proxy via 52W range
-    stop_pct = 0.07
-    stop = round(price * (1 - stop_pct), 2)
+    # Stop: ATR-based (3× ATR) with -18% hard floor — matches lifecycle.py
+    atr_val = t.get("atr", 0.0)
+    atr_stop = price - 3.0 * atr_val if atr_val > 0 else price * 0.82
+    hard_stop = price * 0.82
+    stop = round(max(atr_stop, hard_stop), 2)
+    stop_pct = 1.0 - stop / price if price > 0 else 0.18
 
     # Target: blend of forecast and rule-of-thumb (12-18% over 90d)
     fc_target = fc.get("forecast_price") or 0
@@ -328,6 +340,7 @@ def render_excel(reports: list, top_n: int = 15) -> Workbook:
     ws.title = "Dashboard"
     headers = [
         "#", "Ticker", "Market", "Name", "Sector", "Price",
+        "Stop (ATR)", "T1 (+22%)",
         "Score", "Adj Score", "Verdict",
         "Tech", "Fund", "Mom", "Qual",
         "RSI", "% from 52WH", "Vol Ratio", ">200DMA",
@@ -355,6 +368,11 @@ def render_excel(reports: list, top_n: int = 15) -> Workbook:
         q = r.quality or {}
         ed = r.earnings_drift or {}
         fcf_y = q.get("fcf_yield")
+        
+        atr_val = t.get('atr', 0.0)
+        atr_stop = r.price - 3.0 * atr_val if atr_val > 0 else r.price * 0.82
+        stop_price = max(atr_stop, r.price * 0.82)
+        
         row = [
             i,
             r.symbol,
@@ -362,6 +380,8 @@ def render_excel(reports: list, top_n: int = 15) -> Workbook:
             (r.name or "")[:28],
             (r.sector or "")[:20],
             round(r.price, 2),
+            round(stop_price, 2),
+            round(r.price * 1.22, 2),
             round(r.composite_score, 1),
             round(r.adjusted_score or r.composite_score, 1),
             r.verdict,
@@ -442,7 +462,7 @@ def render_excel(reports: list, top_n: int = 15) -> Workbook:
     ws2 = wb.create_sheet(title="Top Picks Detail")
     detail_headers = [
         "Ticker", "Name", "Market", "Verdict", "Score",
-        "Price", "Sector", "Mkt Cap",
+        "Price", "Stop (ATR)", "T1 (+22%)", "Sector", "Mkt Cap",
         "RSI", "Above 50DMA", "Above 200DMA", "% from 52W High",
         "P/E", "P/B", "ROE %", "D/E", "EPS Gr %", "Rev Gr %", "Profit Margin %",
         "1D %", "1W %", "1M %", "3M %",
@@ -462,6 +482,11 @@ def render_excel(reports: list, top_n: int = 15) -> Workbook:
         headline = ""
         if s.get("headlines"):
             headline = s["headlines"][0].get("title", "")[:60]
+            
+        atr_val = t.get('atr', 0.0)
+        atr_stop = r.price - 3.0 * atr_val if atr_val > 0 else r.price * 0.82
+        stop_price = max(atr_stop, r.price * 0.82)
+            
         row = [
             r.symbol,
             (r.name or "")[:28],
@@ -469,6 +494,8 @@ def render_excel(reports: list, top_n: int = 15) -> Workbook:
             r.verdict,
             round(r.composite_score, 1),
             round(r.price, 2),
+            round(stop_price, 2),
+            round(r.price * 1.22, 2),
             r.sector or "",
             _fmt_money(f.get("market_cap")),
             round(t.get("rsi", 0), 1),

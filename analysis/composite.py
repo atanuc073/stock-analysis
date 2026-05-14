@@ -62,7 +62,10 @@ def analyze(td: TickerData) -> StockReport:
     rep.fundamental = fundamental.compute(td.info)
     rep.momentum = momentum.compute(td.history)
     rep.sentiment = sentiment.compute(td.news)
-    rep.forecast = forecast.compute(td.history)
+    if SCORE_WEIGHTS.get("forecast", 0.0) > 0.0:
+        rep.forecast = forecast.compute(td.history)
+    else:
+        rep.forecast = {"score": 50.0, "signals": []}
     rep.options = options_flow.compute(td.options_summary)
     rep.quality = quality.compute(td.info)
     rep.earnings_drift = earnings_drift.compute(td.history, td.info)

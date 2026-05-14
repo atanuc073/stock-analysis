@@ -31,22 +31,23 @@ FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
 # ── Curated starter watchlist ────────────────────────────────────────────────
 # Indian tickers use NSE suffix ".NS" for yfinance
 WATCHLIST_INDIA = [
-    # Index leaders / blue chips
-    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
-    "HINDUNILVR.NS", "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS",
-    "LT.NS", "AXISBANK.NS", "ASIANPAINT.NS", "MARUTI.NS", "BAJFINANCE.NS",
-    # Mid/high-growth picks
-    "TATAMOTORS.NS", "ADANIENT.NS", "DMART.NS", "TITAN.NS", "SUNPHARMA.NS",
+    # # Index leaders / blue chips
+    # "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
+    # "HINDUNILVR.NS", "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS",
+    # "LT.NS", "AXISBANK.NS", "ASIANPAINT.NS", "MARUTI.NS", "BAJFINANCE.NS",
+    # # Mid/high-growth picks
+    # "TATAMOTORS.NS", "ADANIENT.NS", "DMART.NS", "TITAN.NS", "SUNPHARMA.NS",
     "WIPRO.NS", "HCLTECH.NS", "POWERGRID.NS", "NTPC.NS", "ONGC.NS",
+    "SHARDACROP.NS","AVANTIFEED.NS","TMPV.NS","KPIL.NS","VTL.NS","COROMANDEL.NS","LTFOODS.NS","TECHNOE.NS","TORENTPOWER.NS"
 ]
 
 WATCHLIST_US = [
     # Mega-cap tech
-    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA",
-    # Broad market leaders
-    "BRK-B", "JPM", "V", "JNJ", "WMT", "PG", "XOM", "UNH",
-    # Semis / AI plays
-    "AMD", "AVGO", "TSM", "ASML", "MU",
+    # "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA",
+    # # Broad market leaders
+    # "BRK-B", "JPM", "V", "JNJ", "WMT", "PG", "XOM", "UNH",
+    # # Semis / AI plays
+    # "AMD", "AVGO", "TSM", "ASML", "MU",
     # ETFs for sector signal
     "SPY", "QQQ", "DIA", "IWM",
 ]
