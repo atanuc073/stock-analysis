@@ -27,6 +27,7 @@ from data_sources.yahoo import fetch_many, TickerData
 from analysis.composite import analyze
 from analysis.indicators import atr, annualized_volatility
 from analysis import forecast as forecast_dispatcher
+from report_generator import write_reports
 
 from portfolio.models import ExitSignal
 from factories import (
@@ -133,6 +134,23 @@ def _candidate_from(report, ticker: TickerData) -> TradeCandidate:
     )
 
 
+def _is_stopped_recently(symbol: str, trades: list, days: int = 30) -> bool:
+    """Check if the symbol was stopped out in the last N days."""
+    stop_dates = []
+    for t in trades:
+        if t.symbol == symbol and t.action == "SELL" and t.exit_type == "STOP_LOSS":
+            try:
+                dt = datetime.fromisoformat(t.timestamp)
+                stop_dates.append(dt)
+            except Exception:
+                continue
+    if not stop_dates:
+        return False
+    last_stop = max(stop_dates)
+    delta = (datetime.now() - last_stop).days
+    return delta < days
+
+
 # ── Main runner ──────────────────────────────────────────────────────────────
 def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshold: float = 70.0) -> None:
     log.info("=== Daily Run @ %s | mode=%s ===", datetime.now().isoformat(timespec="seconds"), mode)
@@ -228,7 +246,25 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshol
     # 10) Run gate on new candidates (top N not currently held)
     candidate_bundles: list[CandidateBundle] = []
     held_set = {s.upper() for s in open_symbols}
-    new_pool = [r for r in reports if r.symbol.upper() not in held_set and r.composite_score >= threshold][:30]
+    
+    # Apply re-entry lock: filter out symbols stopped out in the last 30 days
+    blacklist = {
+        r.symbol.upper() for r in reports 
+        if _is_stopped_recently(r.symbol, state.trades, days=30)
+    }
+    
+    new_pool = []
+    for r in reports:
+        if r.symbol.upper() in held_set:
+            continue
+        if r.composite_score < threshold:
+            continue
+        if r.symbol.upper() in blacklist:
+            log.info("Skipping %s — re-entry lock (stopped out recently)", r.symbol)
+            continue
+        new_pool.append(r)
+    
+    new_pool = new_pool[:30]
 
     for r in new_pool:
         td = data.get(r.symbol)
@@ -267,11 +303,16 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshol
     md = _render_markdown(
         regime, sector_lookup, snap, state, held_prices,
         exit_signals, flag_details, tax_advice, candidate_bundles, clusters,
+        blacklist=blacklist,
     )
     today = datetime.now().strftime("%Y-%m-%d")
     md_path = REPORTS_DIR / f"daily_{today}.md"
     md_path.write_text(md, encoding="utf-8")
     log.info("Wrote %s", md_path)
+    
+    # 11b) Generate full Excel/JSON report suite via shared generator
+    full_md, full_json, full_xlsx = write_reports(reports, top_n=top_n, blacklist=blacklist, regime_data=regime)
+    log.info("Wrote full suite: %s, %s, %s", full_md, full_json, full_xlsx)
 
     # 12) Cache picks + exits for paper trader
     _write_paper_cache(candidate_bundles, exit_signals)
@@ -419,7 +460,7 @@ def _live_prices(symbols: list[str], cached: dict[str, TickerData]) -> dict[str,
 # ── Renderers ────────────────────────────────────────────────────────────────
 def _render_markdown(regime, sector_lookup, snap, state, prices,
                      exit_signals, flag_details, tax_advice,
-                     candidate_bundles, clusters) -> str:
+                     candidate_bundles, clusters, blacklist: set[str] | None = None) -> str:
     today = datetime.now().strftime("%Y-%m-%d")
     L: list[str] = []
     L.append(f"# Daily Investment System — {today}\n")
@@ -428,6 +469,8 @@ def _render_markdown(regime, sector_lookup, snap, state, prices,
     L.append(f"## 🌐 Market Regime: **{regime.label}** ({regime.score}/10) — alloc ×{regime.allocation_multiplier:.2f}")
     for n in regime.notes:
         L.append(f"- {n}")
+    if blacklist:
+        L.append(f"- 🔒 **{len(blacklist)} stocks** are in the 30-day re-entry lock (recently stopped out)")
     L.append("")
 
     # Sector leadership

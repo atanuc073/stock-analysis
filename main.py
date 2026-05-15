@@ -12,6 +12,7 @@ from data_sources.yahoo import fetch_many
 from data_sources.universe import broad_universe, russell1000_tickers, nifty500_tickers, nse_all_tickers
 from analysis.composite import analyze, analyze_batch
 from report_generator import write_reports, telegram_summary
+from factories import build_regime_detector
 from telegram_bot import send_message, send_document
 
 logging.basicConfig(
@@ -55,7 +56,15 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True) -> None:
     reports = [r for r in reports if r.composite_score > 0]
     log.info("Analysis complete: %d valid reports", len(reports))
 
-    md_path, json_path, xlsx_path = write_reports(reports, top_n=top_n)
+    # Calculate Market Regime for the report
+    regime = None
+    try:
+        regime = build_regime_detector().detect()
+        log.info("Market Regime: %s (%d/10)", regime.label, regime.score)
+    except Exception as e:
+        log.warning("Could not detect regime for report: %s", e)
+
+    md_path, json_path, xlsx_path = write_reports(reports, top_n=top_n, regime_data=regime)
     log.info("Wrote %s, %s, and %s", md_path, json_path, xlsx_path)
 
     if send_tg:

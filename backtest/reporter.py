@@ -26,7 +26,8 @@ def write_excel(result: BacktestResult, stats: PerformanceStats,
     """Multi-sheet Excel with summary, trades, equity curve, yearly P&L."""
     eq_df = pd.DataFrame([
         {"Date": p.date, "Equity": p.total, "Cash": p.cash,
-         "MarketValue": p.market_value, "OpenPositions": p.n_open}
+         "MarketValue": p.market_value, "OpenPositions": p.n_open,
+         "Regime": p.regime.label if hasattr(p, "regime") and p.regime else ""}
         for p in result.equity_curve
     ])
 
@@ -78,7 +79,19 @@ def write_excel(result: BacktestResult, stats: PerformanceStats,
         ("Expectancy/Trade", f"{stats.expectancy_pct:+.2f}%"),
         ("Profit Factor", f"{stats.profit_factor:.2f}"),
         ("Avg Hold (days)", f"{stats.avg_holding_days:.0f}"),
+        ("", ""),
+        ("REGIMES (Market Context)", ""),
     ]
+    
+    # Count days in each regime
+    regime_counts = {}
+    for p in result.equity_curve:
+        label = p.regime.label if hasattr(p, "regime") and p.regime else "Unknown"
+        regime_counts[label] = regime_counts.get(label, 0) + 1
+        
+    for label, count in sorted(regime_counts.items(), key=lambda x: x[1], reverse=True):
+        summary_rows.append((f"  Days in {label}", count))
+
     for k, v in stats.exits_by_type.items():
         summary_rows.append((f"  Exit: {k}", v))
     summary_df = pd.DataFrame(summary_rows, columns=["Metric", "Value"])
@@ -218,6 +231,19 @@ def write_markdown(result: BacktestResult, stats: PerformanceStats, path: Path,
     L.append(f"| **Expectancy/Trade** | **{stats.expectancy_pct:+.2f}%** |")
     L.append(f"| Profit Factor | {stats.profit_factor:.2f} |")
     L.append(f"| Avg Holding Days | {stats.avg_holding_days:.0f} |")
+
+    L.append("\n### 🌐 Market Context (Regime Breakdown)\n")
+    L.append("| Regime | Days | % of Period |")
+    L.append("|---|---|---|")
+    total_days = len(result.equity_curve)
+    regime_counts = {}
+    for p in result.equity_curve:
+        label = p.regime.label if hasattr(p, "regime") and p.regime else "Unknown"
+        regime_counts[label] = regime_counts.get(label, 0) + 1
+    
+    for label, count in sorted(regime_counts.items(), key=lambda x: x[1], reverse=True):
+        pct = (count / total_days) * 100 if total_days > 0 else 0
+        L.append(f"| {label} | {count} | {pct:.1f}% |")
 
     L.append("\n### Exit Reason Breakdown\n")
     L.append("| Exit Type | Count |")

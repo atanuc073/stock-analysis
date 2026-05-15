@@ -187,6 +187,9 @@ class BacktestEngine:
         self._regime_cache: dict[tuple[pd.Timestamp, str], regime_mod.HistoricalRegime] = {}
         self._last_regime_compute: Optional[pd.Timestamp] = None
         self._current_regime: dict[str, regime_mod.HistoricalRegime] = {}
+        
+        # Re-entry lock: track last stop-loss date per symbol
+        self._last_stop_loss_date: dict[str, pd.Timestamp] = {}
 
     # ── Public API ───────────────────────────────────────────────────────────
     def run(self, dates: pd.DatetimeIndex) -> BacktestResult:
@@ -455,6 +458,12 @@ class BacktestEngine:
         for sym, hd in self.data.items():
             if sym in self.positions and self.positions[sym].status != PositionStatus.CLOSED:
                 continue  # skip open positions
+            
+            # Re-entry lock: skip if stopped out in the last 30 days
+            last_stop = self._last_stop_loss_date.get(sym)
+            if last_stop is not None and (asof - last_stop).days < 30:
+                continue
+                
             if self._regime_blocks_entry(hd.market):
                 continue  # regime says: no new entries in this market
             s = score_at(hd, asof,
@@ -743,6 +752,10 @@ class BacktestEngine:
             days_held=days_held,
             score_at_entry=pos.score_at_entry,
         ))
+        
+        # Record stop-loss date for re-entry lock
+        if sig.exit_type == ExitType.STOP_LOSS:
+            self._last_stop_loss_date[pos.symbol] = asof
 
     def _close_all(self, asof: pd.Timestamp, prices: dict[str, float], reason: str) -> None:
         for sym, pos in list(self.positions.items()):

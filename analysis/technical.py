@@ -20,6 +20,7 @@ def compute(df: pd.DataFrame) -> dict:
     macd = ta.trend.MACD(close)
     macd_line = macd.macd()
     macd_sig = macd.macd_signal()
+    sma20 = close.rolling(20).mean()
     sma50 = close.rolling(50).mean()
     sma200 = close.rolling(200).mean() if len(close) >= 200 else close.rolling(len(close) // 2).mean()
     bb = ta.volatility.BollingerBands(close, window=20)
@@ -77,6 +78,16 @@ def compute(df: pd.DataFrame) -> dict:
         score -= 12; signals.append("Death cross (50/200)")
     if vol_spike:
         score += 5; signals.append(f"Volume spike {vol.iloc[last]/avg_vol_20:.1f}x")
+    
+    # ── Short-term extension (SMA20) ──────────────────────────────────
+    sma20_val = float(sma20.iloc[last]) if not np.isnan(sma20.iloc[last]) else price
+    ext_20 = (price / sma20_val - 1) * 100 if sma20_val > 0 else 0.0
+    if ext_20 > 20:
+        score -= 20; signals.append(f"⚠️ Extreme extension ({ext_20:.1f}% > SMA20)")
+    elif ext_20 > 15:
+        score -= 12; signals.append(f"⚠️ Parabolic ({ext_20:.1f}% > SMA20)")
+    elif ext_20 > 10:
+        score -= 5; signals.append(f"Extended ({ext_20:.1f}% > SMA20)")
 
     # ── Extension / Base scoring (FLIPPED from original) ─────────────────
     # The old code rewarded "near 52w high" — that's how we bought tops.
@@ -110,6 +121,7 @@ def compute(df: pd.DataFrame) -> dict:
         "low_52w": low_52w,
         "pct_from_52w_high": pct_from_52w_high,
         "pct_from_52w_low": pct_from_52w_low,
+        "pct_from_sma20": ext_20,
         "in_base": bool(in_base),
         "extended_at_high": bool(extended_at_high),
         "volume_ratio": float(vol.iloc[last] / avg_vol_20) if avg_vol_20 else 1.0,

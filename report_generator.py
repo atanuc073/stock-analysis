@@ -62,8 +62,13 @@ def _select_top_picks(reports: list, top_n: int, sector_cap: int = TOP_PICKS_SEC
     return picks
 
 
-def render_markdown(reports: list, top_n: int = 15) -> str:
+def render_markdown(reports: list, top_n: int = 15, blacklist: set[str] | None = None) -> str:
     today = datetime.now().strftime("%Y-%m-%d")
+    
+    # Apply blacklist filter to the pool before selecting top picks
+    if blacklist:
+        reports = [r for r in reports if r.symbol.upper() not in blacklist]
+        
     sorted_rs = sorted(reports, key=_score_of, reverse=True)
     top = _select_top_picks(reports, top_n)
     bottom = sorted_rs[-min(5, len(sorted_rs)):]
@@ -204,7 +209,7 @@ def _risk_flags(r) -> str:
     return " ".join(flags)
 
 
-def _swing_setup(r) -> dict | None:
+def _swing_setup(r, blacklist: set[str] | None = None) -> dict | None:
     """Evaluate a ticker as a 90-day swing trade setup.
 
     Returns a dict with entry/stop/target/RR/conviction, or None if it does
@@ -230,6 +235,8 @@ def _swing_setup(r) -> dict | None:
     flags = _risk_flags(r).split()
 
     # ── Hard filters (must pass all) ─────────────────────────────────
+    if blacklist and r.symbol.upper() in blacklist:
+        return None
     if score < 60: return None
     if adj < 58: return None
     if not (above_50 and above_200): return None
@@ -328,9 +335,14 @@ def _style_header_row(ws, row_num=1):
         cell.border = _BORDER
 
 
-def render_excel(reports: list, top_n: int = 15) -> Workbook:
+def render_excel(reports: list, top_n: int = 15, blacklist: set[str] | None = None, regime_data=None) -> Workbook:
     """Build a multi-sheet Excel workbook from StockReport list."""
     wb = Workbook()
+    
+    # Apply blacklist filter to the pool before selecting top picks
+    if blacklist:
+        reports = [r for r in reports if r.symbol.upper() not in blacklist]
+        
     sorted_rs = sorted(reports, key=_score_of, reverse=True)
     top = _select_top_picks(reports, top_n)
     bottom = sorted_rs[-min(5, len(sorted_rs)):]
@@ -558,7 +570,7 @@ def render_excel(reports: list, top_n: int = 15) -> Workbook:
 
     swing_candidates = []
     for r in sorted_rs:
-        setup = _swing_setup(r)
+        setup = _swing_setup(r, blacklist=blacklist)
         if setup is None:
             continue
         swing_candidates.append((r, setup))
@@ -682,12 +694,26 @@ def render_excel(reports: list, top_n: int = 15) -> Workbook:
     ws3.auto_filter.ref = f"A1:{get_column_letter(len(avoid_headers))}1"
     _auto_width(ws3)
 
+    # ── Sheet 5: Market Context ─────────────────────────────────────────
+    if regime_data:
+        ws_ctx = wb.create_sheet(title="Market Context")
+        ws_ctx.append(["Metric", "Value"])
+        _style_header_row(ws_ctx)
+        ws_ctx.append(["Current Regime", regime_data.label])
+        ws_ctx.append(["Regime Score", f"{regime_data.score}/10"])
+        ws_ctx.append(["Allocation Multiplier", f"{regime_data.allocation_multiplier:.2f}x"])
+        ws_ctx.append(["", ""])
+        ws_ctx.append(["Logic / Notes", ""])
+        for note in regime_data.notes:
+            ws_ctx.append(["-", note])
+        _auto_width(ws_ctx)
+
     return wb
 
 
-def write_reports(reports: list, top_n: int = 15) -> tuple[Path, Path, Path]:
+def write_reports(reports: list, top_n: int = 15, blacklist: set[str] | None = None, regime_data=None) -> tuple[Path, Path, Path]:
     today = datetime.now().strftime("%Y-%m-%d")
-    md = render_markdown(reports, top_n)
+    md = render_markdown(reports, top_n, blacklist=blacklist)
     md_path = REPORTS_DIR / f"report_{today}.md"
     md_path.write_text(md, encoding="utf-8")
 
@@ -698,7 +724,7 @@ def write_reports(reports: list, top_n: int = 15) -> tuple[Path, Path, Path]:
     )
 
     xlsx_path = REPORTS_DIR / f"report_{today}.xlsx"
-    wb = render_excel(reports, top_n=top_n)
+    wb = render_excel(reports, top_n=top_n, blacklist=blacklist, regime_data=regime_data)
     wb.save(str(xlsx_path))
 
     return md_path, json_path, xlsx_path
