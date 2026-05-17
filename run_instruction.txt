@@ -47,3 +47,6 @@ python -m backtest.cli --start 2020-01-01 --end 2024-12-31 --capital 1000000
 .\.venv\Scripts\python.exe historical_runner.py --date 2024-01-15 --mode broad --top 10
 .\.venv\Scripts\python.exe historical_runner.py --date 2023-06-01 --mode broad --top 15
 .\.venv\Scripts\python.exe historical_runner.py                # defaults: today, broad, top 10
+
+Backtest with uptrend
+python -m backtest.cli --start 2023-01-01 --end 2024-12-31 --universe us --threshold 70 --uptrend

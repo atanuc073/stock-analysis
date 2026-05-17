@@ -43,13 +43,14 @@ WATCHLIST_INDIA = [
 
 WATCHLIST_US = [
     # Mega-cap tech
-    # "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA",
+    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA",
     # # Broad market leaders
     # "BRK-B", "JPM", "V", "JNJ", "WMT", "PG", "XOM", "UNH",
     # # Semis / AI plays
-    # "AMD", "AVGO", "TSM", "ASML", "MU",
+    "AMD", "AVGO", "TSM", "ASML", "MU","LRCX"
     # ETFs for sector signal
     "SPY", "QQQ", "DIA", "IWM",
+    "CF","ANGLOLDSHR",
 ]
 
 WATCHLIST = WATCHLIST_INDIA + WATCHLIST_US

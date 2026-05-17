@@ -14,7 +14,7 @@ from typing import Optional
 
 import pandas as pd
 
-from analysis import technical, fundamental, momentum, forecast, quality, earnings_drift
+from analysis import technical, fundamental, momentum, forecast, quality, earnings_drift, uptrend
 from analysis.indicators import atr, annualized_volatility
 from config import SCORE_WEIGHTS
 
@@ -36,6 +36,9 @@ class BacktestScore:
     earnings_drift: dict
     atr_value: float
     annual_vol: float
+    uptrend_score: float = 0.0
+    suggested_stop: Optional[float] = None
+    stop_method: str = "n/a"
     adjusted_score: float = 0.0  # after cross-sectional pass; defaults to score
     cross_sectional: dict = None  # type: ignore[assignment]
 
@@ -134,7 +137,18 @@ def score_at(hd: HistoricalData, asof: pd.Timestamp,
     # Renormalize so composite is on [0,100] regardless of whether weights
     # sum exactly to 1.0. Defensive: prevents silent scaling bugs when
     # SCORE_WEIGHTS is edited and the sum drifts off 1.0.
+    # ── Risk Management (Smart Stops) ──────────────────────────────────
+    # Re-use the same logic as the live scanner
+    from analysis import stops
+    up_data = uptrend.compute(hist, regime="Neutral") # Simplified regime for backtest
+    up_score = up_data.get("score", 50.0)
+    
+    # Extract the suggested stop from the uptrend data
+    s_stop = up_data.get("stop_suggested")
+    s_method = up_data.get("stop_method", "n/a")
+
     total_w = sum(w.get(k, 0) for k in parts)
+
     if total_w > 0:
         composite = sum(parts[k] * w.get(k, 0) for k in parts) / total_w
     else:
@@ -155,6 +169,9 @@ def score_at(hd: HistoricalData, asof: pd.Timestamp,
         earnings_drift=edrift,
         atr_value=float(atr(hist) or 0.0),
         annual_vol=float(annualized_volatility(hist) or 0.30),
+        uptrend_score=up_score,
+        suggested_stop=s_stop,
+        stop_method=s_method,
     )
 
 

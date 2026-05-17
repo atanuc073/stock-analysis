@@ -42,6 +42,8 @@ class BacktestConfig:
     base_position_weight: float = 0.10         # 10% of equity per new position
     max_position_weight: float = 0.15
     max_sector_weight: float = 0.30
+    max_extension_pct: float = 40.0            # max percentage stock can be extended above 200DMA (default 40%)
+    max_market_weight: float = 0.70            # max country concentration weight (default 70%)
     transaction_cost_bps: float = 0.0          # 0 bps each side (0.00%)
     slippage_bps: float = 0.0                  # 0 bps slippage
     include_forecast: bool = False             # forecast slow; off by default
@@ -94,6 +96,7 @@ class BacktestConfig:
     # recycle into the cash pool (no change to existing reinvestment logic).
     sip_amount: float = 0.0                     # 0 disables SIP (lumpsum mode)
     sip_day_of_month: int = 13
+    uptrend_mode: bool = False                  # if True, use s.uptrend_score for entries
 
     @property
     def cost_per_side(self) -> float:
@@ -119,6 +122,7 @@ class BTTrade:
     pnl_pct: float = 0.0
     days_held: int = 0
     score_at_entry: float = 0.0
+    uptrend_score_at_entry: float = 0.0
     # ── Entry-context diagnostics (populated on BUY only) ───────────────
     pct_above_sma200_at_entry: float = 0.0    # extension above 200DMA
     pct_from_52w_high_at_entry: float = 0.0   # negative; 0 = at high
@@ -137,6 +141,7 @@ class EquityPoint:
     total: float
     n_open: int
     contribution: float = 0.0   # cash injected on this date (SIP), 0 otherwise
+    regime: Optional[regime_mod.HistoricalRegime] = None
 
 
 @dataclass
@@ -211,6 +216,9 @@ class BacktestEngine:
         rebalance_dates.add(dates[-1])  # always close on last day
 
         for asof in tqdm(dates, desc="Simulating"):
+            # Update regime daily (internally respects frequency checks)
+            self._refresh_regime(asof)
+
             # 0) SIP injection: first trading day of month at/after sip_day
             sip_amount_today = 0.0
             if self.cfg.sip_amount > 0:
@@ -227,7 +235,7 @@ class BacktestEngine:
             for sym, pos in list(self.positions.items()):
                 cp = current_prices.get(sym)
                 if cp is not None:
-                    ExitEvaluator.update_peak(pos, cp)
+                    ExitEvaluator.update_peak(pos, cp, self.exit_eval.cfg.trail_stop_pct)
 
             # 1b) Detect macro shock day (VIX spike + index drop)
             shock = self._is_shock_day(asof)
@@ -251,6 +259,7 @@ class BacktestEngine:
                 n_open=sum(1 for p in self.positions.values()
                            if p.status != PositionStatus.CLOSED),
                 contribution=sip_amount_today,
+                regime=self._worst_regime(),
             ))
 
         # 5) Force close remaining positions at end
@@ -264,6 +273,7 @@ class BacktestEngine:
             market_value=self._market_value(final_prices),
             total=self.cash + self._market_value(final_prices),
             n_open=0,
+            regime=self._worst_regime(),
         ))
 
         return BacktestResult(
@@ -357,6 +367,23 @@ class BacktestEngine:
                 continue
         return order[worst_idx]
 
+    def _worst_regime(self) -> Optional[regime_mod.HistoricalRegime]:
+        """HistoricalRegime object corresponding to the most defensive regime across markets."""
+        if not self.cfg.use_regime or not self._current_regime:
+            return None
+        order = ["BEAR", "CAUTIOUS", "NEUTRAL", "NEUTRAL_BULL", "BULL"]
+        worst_r = None
+        worst_idx = len(order)
+        for r in self._current_regime.values():
+            try:
+                idx = order.index(r.label)
+                if idx < worst_idx:
+                    worst_idx = idx
+                    worst_r = r
+            except ValueError:
+                continue
+        return worst_r
+
     def _regime_min_score(self) -> float:
         """min_score bumped up by regime weakness."""
         bump = self.cfg.regime_min_score_bumps.get(self._worst_regime_label(), 0.0)
@@ -428,6 +455,7 @@ class BacktestEngine:
                 pnl_abs=pnl_abs, pnl_pct=pnl_pct,
                 days_held=days_held,
                 score_at_entry=pos.score_at_entry,
+                uptrend_score_at_entry=pos.uptrend_score_at_entry,
             ))
 
     # ── Entries ──────────────────────────────────────────────────────────────
@@ -476,7 +504,7 @@ class BacktestEngine:
             # blow-off tops). The technical scorer already penalizes these
             # but the score can still clear 65 via fundamentals/momentum.
             ext = s.technical.get("pct_above_sma200", 0.0)
-            if ext > 40.0:
+            if ext > self.cfg.max_extension_pct:
                 continue
             scores.append(s)
         if not scores:
@@ -495,12 +523,15 @@ class BacktestEngine:
                     s.adjusted_score = s.score
 
         # Filter on adjusted_score so the backtest matches the live ranking.
+        # If uptrend_mode is enabled, we use the pure momentum score.
+        score_attr = "uptrend_score" if self.cfg.uptrend_mode else "adjusted_score"
+        
         # Min score is bumped up in weak regimes (capital preservation):
         effective_min_score = self._regime_min_score()
-        scores = [s for s in scores if s.adjusted_score >= effective_min_score]
+        scores = [s for s in scores if getattr(s, score_attr) >= effective_min_score]
         if not scores:
             return
-        scores.sort(key=lambda s: s.adjusted_score, reverse=True)
+        scores.sort(key=lambda s: getattr(s, score_attr), reverse=True)
 
         equity = self.cash + self._market_value(current_prices)
         sector_weights = self._sector_weights(current_prices, equity)
@@ -526,7 +557,7 @@ class BacktestEngine:
             # Concentration checks
             if sector_weights.get(s.sector, 0.0) >= self.cfg.max_sector_weight:
                 continue
-            if market_weights.get(s.market, 0.0) >= 0.70:
+            if market_weights.get(s.market, 0.0) >= self.cfg.max_market_weight:
                 continue
 
             # Volatility-adjusted sizing × regime allocation multiplier.
@@ -570,9 +601,17 @@ class BacktestEngine:
         pos = self.factory.create(
             symbol=s.symbol, qty=qty, entry_price=s.price,
             atr=s.atr_value, sector=s.sector, market=s.market,
-            score=s.adjusted_score, entry_date=asof.strftime("%Y-%m-%d"),
+            score=s.adjusted_score, uptrend_score=s.uptrend_score,
+            entry_date=asof.strftime("%Y-%m-%d"),
         )
-        # Tighten stop in weak regimes: pull stop closer to entry by the
+        
+        # Override with "Smart Stop" if available
+        if s.suggested_stop and s.suggested_stop < s.price:
+            pos.stop_price = s.suggested_stop
+            pos.initial_stop_price = s.suggested_stop
+            pos.notes = f"Stop via {s.stop_method}"
+
+        # Tighten stop in weak regimes
         # regime stop multiplier. Multiplier < 1.0 means a tighter stop
         # (smaller loss tolerance) when regime is degraded.
         stop_mult = self._regime_stop_mult(s.market)
@@ -586,6 +625,8 @@ class BacktestEngine:
         r = self._current_regime.get(s.market)
         if r is not None:
             regime_label = r.label
+
+        score_attr = "uptrend_score" if self.cfg.uptrend_mode else "adjusted_score"
         self.trades.append(BTTrade(
             symbol=s.symbol, action="BUY", qty=qty, price=s.price,
             gross_value=s.price * qty,
@@ -593,8 +634,9 @@ class BacktestEngine:
             net_value=cost,
             timestamp=asof.isoformat(),
             sector=s.sector, market=s.market,
-            reason=f"adj={s.adjusted_score:.1f} (raw={s.score:.1f})",
+            reason=f"{'UP' if self.cfg.uptrend_mode else 'adj'}={getattr(s, score_attr):.1f}",
             score_at_entry=s.adjusted_score,
+            uptrend_score_at_entry=s.uptrend_score,
             pct_above_sma200_at_entry=float(s.technical.get("pct_above_sma200", 0.0) or 0.0),
             pct_from_52w_high_at_entry=float(s.technical.get("pct_from_52w_high", 0.0) or 0.0),
             rsi_at_entry=float(s.technical.get("rsi", 0.0) or 0.0),
@@ -751,6 +793,7 @@ class BacktestEngine:
             pnl_abs=pnl_abs, pnl_pct=pnl_pct,
             days_held=days_held,
             score_at_entry=pos.score_at_entry,
+            uptrend_score_at_entry=pos.uptrend_score_at_entry,
         ))
         
         # Record stop-loss date for re-entry lock

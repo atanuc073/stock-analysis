@@ -7,7 +7,7 @@ from tqdm import tqdm
 from config import SCORE_WEIGHTS
 from analysis import (
     technical, fundamental, momentum, sentiment, forecast, options_flow,
-    quality, earnings_drift, cross_sectional,
+    quality, earnings_drift, cross_sectional, uptrend,
 )
 from data_sources.yahoo import TickerData
 
@@ -30,6 +30,7 @@ class StockReport:
     options: dict = field(default_factory=dict)
     quality: dict = field(default_factory=dict)
     earnings_drift: dict = field(default_factory=dict)
+    uptrend: dict = field(default_factory=dict)
     cross_sectional: dict = field(default_factory=dict)
     all_signals: list = field(default_factory=list)
     error: str = ""
@@ -50,7 +51,7 @@ def _verdict(score: float) -> str:
     return "AVOID"
 
 
-def analyze(td: TickerData) -> StockReport:
+def analyze(td: TickerData, regime: Optional[dict] = None) -> StockReport:
     rep = StockReport(symbol=td.symbol, market="IN" if td.is_indian else "US")
     if not td.ok:
         rep.error = td.error or "no data"
@@ -69,6 +70,10 @@ def analyze(td: TickerData) -> StockReport:
     rep.options = options_flow.compute(td.options_summary)
     rep.quality = quality.compute(td.info)
     rep.earnings_drift = earnings_drift.compute(td.history, td.info)
+    
+    # Pass regime for dynamic stops
+    regime_name = regime.get("regime", "Neutral") if regime else "Neutral"
+    rep.uptrend = uptrend.compute(td.history, regime=regime_name)
 
     rep.name = rep.fundamental.get("name") or td.symbol
     rep.sector = rep.fundamental.get("sector") or ""
@@ -132,8 +137,38 @@ def analyze_batch(tickers: Iterable[TickerData]) -> list[StockReport]:
         - `cross_sectional`   : detail dict (sector_val_score, mom_z, ...)
     Verdicts are recomputed from the adjusted score.
     """
-    reports = [analyze(td) for td in tqdm(tickers, desc="Analyzing", unit="stock")]
+    # 0. Fetch regimes for dynamic stops
+    try:
+        from data_sources.yahoo import fetch_many
+        indices = fetch_many(["^GSPC", "^NSEI"], period="1y", show_progress=False)
+        regimes = {
+            "US": uptrend.check_market_regime(indices["^GSPC"].history) if indices.get("^GSPC") and indices["^GSPC"].ok else None,
+            "IN": uptrend.check_market_regime(indices["^NSEI"].history) if indices.get("^NSEI") and indices["^NSEI"].ok else None
+        }
+    except Exception:
+        regimes = {"US": None, "IN": None}
+
+    # 1. Individual analysis
+    reports = []
+    for td in tqdm(tickers, desc="Analyzing", unit="stock"):
+        r_context = regimes["IN"] if td.is_indian else regimes["US"]
+        reports.append(analyze(td, regime=r_context))
+    
+    # 2. Cross-sectional valuation & rank bonus
     cross_sectional.apply(reports)
+    
+    # 3. Uptrend Relative Strength
+    
+    # Split reports by market and apply RS + Regime separately
+    us_reps = [r for r in reports if r.market == "US"]
+    in_reps = [r for r in reports if r.market == "IN"]
+    
+    if us_reps:
+        uptrend.apply_rs(us_reps, market_regime=regimes["US"])
+    if in_reps:
+        uptrend.apply_rs(in_reps, market_regime=regimes["IN"])
+
+    # 4. Finalize verdicts
     for r in reports:
         if r.composite_score > 0:   # don't overwrite N/A errors
             r.verdict = _verdict(r.adjusted_score)

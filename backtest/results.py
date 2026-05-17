@@ -293,8 +293,12 @@ def score_calibration(result: BacktestResult,
     A monotonic curve = scorer is signal. A flat curve = scorer is noise above
     the threshold.
     """
-    sells = [t for t in result.trades
-             if t.action == "SELL" and t.score_at_entry > 0]
+    if result.config.uptrend_mode:
+        sells = [t for t in result.trades
+                 if t.action == "SELL" and t.uptrend_score_at_entry > 0]
+    else:
+        sells = [t for t in result.trades
+                 if t.action == "SELL" and t.score_at_entry > 0]
     if not sells:
         return pd.DataFrame()
 
@@ -302,7 +306,8 @@ def score_calibration(result: BacktestResult,
         bin_edges = [0, 60, 65, 70, 75, 80, 85, 100]
 
     df = pd.DataFrame([
-        {"score": t.score_at_entry, "pnl_pct": t.pnl_pct,
+        {"score": t.uptrend_score_at_entry if result.config.uptrend_mode else t.score_at_entry,
+         "pnl_pct": t.pnl_pct,
          "pnl_abs": t.pnl_abs, "days": t.days_held,
          "exit": t.exit_type or ""}
         for t in sells
@@ -393,7 +398,7 @@ def top_chase_diagnostic(result: BacktestResult,
             "Date": entry_ts.date(),
             "Symbol": t.symbol,
             "Sector": t.sector,
-            "Score": round(t.score_at_entry, 1),
+            "Score": round(t.uptrend_score_at_entry if result.config.uptrend_mode else t.score_at_entry, 1),
             "Pct_Above_200DMA": round(t.pct_above_sma200_at_entry, 2),
             "Pct_From_52w_High": round(t.pct_from_52w_high_at_entry, 2),
             "RSI": round(t.rsi_at_entry, 1),

@@ -49,6 +49,7 @@ class Position:
     sector: str = ""
     market: str = "IN"             # IN | US
     score_at_entry: float = 0.0
+    uptrend_score_at_entry: float = 0.0
     status: PositionStatus = PositionStatus.OPEN
     realized_pnl: float = 0.0
     notes: str = ""

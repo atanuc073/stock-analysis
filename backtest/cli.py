@@ -20,6 +20,7 @@ from config import REPORTS_DIR, WATCHLIST, WATCHLIST_INDIA, WATCHLIST_US
 
 from .data_loader import load_universe, trading_dates
 from .engine import BacktestConfig, BacktestEngine
+from portfolio.lifecycle import ExitConfig
 from .results import compute as compute_stats
 from .reporter import write_excel, write_markdown, write_chart
 from . import regime as regime_mod
@@ -41,6 +42,34 @@ def _resolve_universe(name: str) -> list[str]:
         return WATCHLIST_INDIA
     if name == "us":
         return WATCHLIST_US
+    if name == "russell1000":
+        try:
+            from data_sources.universe import russell1000_tickers
+            return russell1000_tickers()
+        except Exception as e:
+            log.warning("russell1000 universe unavailable (%s); falling back to watchlist", e)
+            return WATCHLIST
+    if name == "sp500":
+        try:
+            from data_sources.universe import sp500_tickers
+            return sp500_tickers()
+        except Exception as e:
+            log.warning("sp500 universe unavailable (%s); falling back to watchlist", e)
+            return WATCHLIST
+    if name == "nifty500":
+        try:
+            from data_sources.universe import nifty500_tickers
+            return nifty500_tickers()
+        except Exception as e:
+            log.warning("nifty500 universe unavailable (%s); falling back to watchlist", e)
+            return WATCHLIST
+    if name == "nse_all":
+        try:
+            from data_sources.universe import nse_all_tickers
+            return nse_all_tickers()
+        except Exception as e:
+            log.warning("nse_all universe unavailable (%s); falling back to watchlist", e)
+            return WATCHLIST
     if name == "broad":
         try:
             from data_sources.universe import broad_universe
@@ -73,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--start", required=True, help="Backtest start date (YYYY-MM-DD)")
     p.add_argument("--end", required=True, help="Backtest end date (YYYY-MM-DD)")
     p.add_argument("--capital", type=float, default=1_000_000.0,
-                   help="Initial capital (default: ₹10,00,000)")
+                   help="Initial capital (default: 1,000,000)")
     p.add_argument("--universe", default="watchlist",
                    help="watchlist | india | us | broad | RELIANCE.NS,TCS.NS,...")
     p.add_argument("--threshold", type=float, default=60.0,
@@ -81,6 +110,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--rebalance-days", type=int, default=5,
                    help="Rebalance every N trading days (default 5 = weekly)")
     p.add_argument("--max-positions", type=int, default=12)
+    p.add_argument("--max-extension", type=float, default=40.0,
+                   help="Max extension above 200DMA to buy (default 40.0)")
+    p.add_argument("--max-sector-weight", type=float, default=0.30,
+                   help="Max sector concentration weight (default 0.30)")
+    p.add_argument("--max-market-weight", type=float, default=0.70,
+                   help="Max country concentration weight (default 0.70)")
     p.add_argument("--include-forecast", action="store_true",
                    help="Include forecast component (slower)")
     p.add_argument("--legacy-weights", action="store_true",
@@ -89,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
                         "weights with neutral 50 for missing components.")
     p.add_argument("--output-dir", default=None,
                    help="Output directory (default reports/backtest/)")
+    p.add_argument("--uptrend", action="store_true",
+                   help="Uptrend-only mode: use the Stage 2 / breakout score as the primary signal")
     p.add_argument("--max-workers", type=int, default=8,
                    help="Concurrent fetches (default 8)")
     p.add_argument("--benchmark-india", default="^NSEI")
@@ -103,10 +140,12 @@ def main(argv: list[str] | None = None) -> int:
                    choices=["BEAR", "CAUTIOUS", "NEUTRAL", "NEUTRAL_BULL", "BULL"],
                    help="Skip new entries when regime label ≤ this (default BEAR)")
     p.add_argument("--sip-amount", type=float, default=0.0,
-                   help="SIP amount per month (₹). 0 = lumpsum mode (default)")
+                   help="SIP amount per month (INR). 0 = lumpsum mode (default)")
     p.add_argument("--sip-day", type=int, default=13,
                    help="Day of month to inject SIP (default 13). Falls to next "
                         "trading day if non-trading.")
+    p.add_argument("--trail-stop-pct", type=float, default=None,
+                   help="Continuous trailing stop-loss from entry by N% (e.g. 15 for 15%)")
     args = p.parse_args(argv)
 
     output_dir = Path(args.output_dir) if args.output_dir else REPORTS_DIR / "backtest"
@@ -134,12 +173,16 @@ def main(argv: list[str] | None = None) -> int:
         rebalance_freq_days=args.rebalance_days,
         min_score=args.threshold,
         max_positions=args.max_positions,
+        max_sector_weight=args.max_sector_weight,
+        max_extension_pct=args.max_extension,
+        max_market_weight=args.max_market_weight,
         include_forecast=args.include_forecast,
         live_weights=not args.legacy_weights,
         use_regime=not args.no_regime,
         regime_skip_below=args.regime_skip_below,
         sip_amount=args.sip_amount,
         sip_day_of_month=args.sip_day,
+        uptrend_mode=args.uptrend,
     )
 
     # Pre-load benchmarks (also used as regime input)
@@ -166,7 +209,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         log.info("Regime-aware sizing DISABLED")
 
-    engine = BacktestEngine(data=data, config=cfg, regime_data=regime_data or None)
+    exit_val = args.trail_stop_pct / 100.0 if args.trail_stop_pct else None
+    exit_cfg = ExitConfig(trail_stop_pct=exit_val) if exit_val else None
+    engine = BacktestEngine(data=data, config=cfg, exit_cfg=exit_cfg, regime_data=regime_data or None)
     result = engine.run(dates)
 
     # 4) Stats

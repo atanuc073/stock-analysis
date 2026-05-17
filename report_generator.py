@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Iterable, Optional
 
+import numpy as np
+import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import (
     Alignment, Border, Font, PatternFill, Side, numbers,
@@ -205,7 +208,12 @@ def _risk_flags(r) -> str:
     if days is not None and 0 <= days <= 7:
         flags.append("ERPOST")
     if rsi and rsi <= 30:
-        flags.append("OS")  # oversold = potential opportunity
+        flags.append("OS")
+    inst_score = t.get("inst_score") or 50
+    if inst_score >= 65:
+        flags.append("ACCUM")
+    elif inst_score <= 35:
+        flags.append("DIST")
     return " ".join(flags)
 
 
@@ -278,6 +286,9 @@ def _swing_setup(r, blacklist: set[str] | None = None) -> dict | None:
     if -15 <= pct_from_high <= -5: sq += 6       # ideal pullback zone
     if vol_ratio >= 1.2: sq += 5
     if vol_ratio >= 1.5: sq += 3
+    inst_s = t.get("inst_score") or 50
+    if inst_s >= 65: sq += 5
+    if inst_s >= 75: sq += 3
     eps_g = f.get("eps_growth") or 0
     if eps_g > 0.10: sq += 4
     if eps_g > 0.20: sq += 3
@@ -354,7 +365,7 @@ def render_excel(reports: list, top_n: int = 15, blacklist: set[str] | None = No
         "#", "Ticker", "Market", "Name", "Sector", "Price",
         "Stop (ATR)", "T1 (+22%)",
         "Score", "Adj Score", "Verdict",
-        "Tech", "Fund", "Mom", "Qual",
+        "Tech", "Fund", "Mom", "Qual", "Inst Score", "U/D Ratio", "RS Rating", "Dist 200", "ADR (20)",
         "RSI", "% from 52WH", "Vol Ratio", ">200DMA",
         "1D %", "1W %", "1M %", "3M %",
         "P/E", "P/B", "ROE %", "D/E", "FCF Yield %",
@@ -401,6 +412,11 @@ def render_excel(reports: list, top_n: int = 15, blacklist: set[str] | None = No
             round(f.get("score") or 0, 0),
             round(m.get("score") or 0, 0),
             round(q.get("score") or 0, 0),
+            round(t.get("inst_score") or 50, 0),
+            round(t.get("inst_metrics", {}).get("ud_ratio") or 1.0, 2),
+            round(m.get("rs_value") or 0, 1),
+            round(t.get("dist_200") or 0, 1),
+            round(t.get("adr_20") or 0, 2),
             round(t.get("rsi", 0), 1),
             round(t.get("pct_from_52w_high") or 0, 1),
             round(t.get("volume_ratio") or 0, 2),
@@ -440,8 +456,9 @@ def render_excel(reports: list, top_n: int = 15, blacklist: set[str] | None = No
         verdict_cell = ws.cell(row=row_num, column=verdict_col)
         verdict_cell.fill = _verdict_fill(r.verdict)
         verdict_cell.font = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
-        # Color-code component sub-scores (Tech, Fund, Mom, Qual)
-        for sub_col in range(headers.index("Tech") + 1, headers.index("Qual") + 2):
+        # Color-code component sub-scores (Tech, Fund, Mom, Qual, Inst)
+        for sub_name in ["Tech", "Fund", "Mom", "Qual", "Inst Score"]:
+            sub_col = headers.index(sub_name) + 1
             sub_cell = ws.cell(row=row_num, column=sub_col)
             try:
                 v = float(sub_cell.value) if sub_cell.value is not None else 0
@@ -477,6 +494,7 @@ def render_excel(reports: list, top_n: int = 15, blacklist: set[str] | None = No
         "Price", "Stop (ATR)", "T1 (+22%)", "Sector", "Mkt Cap",
         "RSI", "Above 50DMA", "Above 200DMA", "% from 52W High",
         "P/E", "P/B", "ROE %", "D/E", "EPS Gr %", "Rev Gr %", "Profit Margin %",
+        "Inst Score", "U/D Ratio",
         "1D %", "1W %", "1M %", "3M %",
         "Forecast 21d %", "Forecast Price",
         "Sentiment Avg", "Top Headline",
@@ -521,6 +539,8 @@ def render_excel(reports: list, top_n: int = 15, blacklist: set[str] | None = No
             round((f.get("eps_growth") or 0) * 100, 1),
             round((f.get("revenue_growth") or 0) * 100, 1),
             round((f.get("profit_margin") or 0) * 100, 1),
+            round(t.get("inst_score") or 50, 0),
+            round(t.get("inst_metrics", {}).get("ud_ratio") or 1.0, 2),
             round(m.get("ret_1d") or 0, 2),
             round(m.get("ret_1w") or 0, 2),
             round(m.get("ret_1m") or 0, 2),
@@ -561,7 +581,7 @@ def render_excel(reports: list, top_n: int = 15, blacklist: set[str] | None = No
         "Conviction", "Setup Q", "Score", "Adj Score",
         "Entry", "Stop", "Target", "Stop %", "Target %", "R:R",
         "Size %",
-        "RSI", "Vol Ratio", "% from 52WH", "Days Since ER",
+        "RSI", "Vol Ratio", "Inst Score", "U/D Ratio", "RS Rating", "Dist 200", "ADR (20)", "% from 52WH", "Days Since ER",
         "EPS Gr %", "ROE %", "Forecast 21d %",
         "Top Signals",
     ]
@@ -608,6 +628,11 @@ def render_excel(reports: list, top_n: int = 15, blacklist: set[str] | None = No
             sp["size_pct"],
             round(sp["rsi"], 1),
             round(sp["vol_ratio"], 2),
+            round(t.get("inst_score") or 50, 0),
+            round(t.get("inst_metrics", {}).get("ud_ratio") or 1.0, 2),
+            round(m.get("rs_value") or 0, 1),
+            round(t.get("dist_200") or 0, 1),
+            round(t.get("adr_20") or 0, 2),
             round(sp["pct_from_high"], 1),
             sp["er_days"] if sp["er_days"] is not None else "—",
             round((f.get("eps_growth") or 0) * 100, 1),
@@ -663,7 +688,96 @@ def render_excel(reports: list, top_n: int = 15, blacklist: set[str] | None = No
         )
         ws_sw.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(swing_headers))
 
-    # ── Sheet 4: Avoid / Weak ───────────────────────────────────────────
+    # ── Sheet 4: Uptrend Scans (Minervini/Weinstein) ──────────────────
+    ws_up = wb.create_sheet(title="Uptrend Scans")
+    up_headers = [
+        "Ticker", "Name", "Score", "Decision", 
+        "Stop Loss", "Stop Type", "Risk %", "Shares",
+        "Signals", "RS Rating", "VCP Score", "Vol Ratio", "U/D (50d)", "U/D (15d)",
+        "Stage 2", "Breakout", "Pivot Dist %", "52W High %", 
+        "Vol Dryup", "ADR %", "Market", "Sector"
+    ]
+    ws_up.append(up_headers)
+    _style_header_row(ws_up)
+
+    # Sort by uptrend score
+    up_reps = sorted(reports, key=lambda r: (r.uptrend or {}).get("score", 0), reverse=True)
+    for r in up_reps:
+        up = r.uptrend or {}
+        score = up.get("score", 0)
+        
+        # Stricter categorization
+        is_stage2 = up.get("stage2", False)
+        rs_pct = up.get("rs_pct", 50)
+        
+        if score >= 82 and is_stage2 and rs_pct >= 80:
+            decision = "STRONG BUY"
+        elif score >= 72:
+            decision = "BUY"
+        elif score >= 55:
+            decision = "HOLD"
+        elif score >= 40:
+            decision = "REDUCE"
+        else:
+            decision = "AVOID"
+
+        row = [
+            r.symbol,
+            r.name[:35],
+            round(score, 1),
+            decision,
+            up.get("stop_suggested"),
+            up.get("stop_method", "n/a"),
+            f"{up.get('risk_pct', 0):.1f}%",
+            up.get("suggested_shares", 0),
+            "; ".join(up.get("signals", [])[:5]),
+            round(up.get("rs_pct", 50), 1),
+            round(up.get("vcp", 0), 3) if up.get("vcp") else 0,
+            round(up.get("today_vol_ratio", 1), 2),
+            round(up.get("ud_50", 1), 2) if up.get("ud_50") else 1.0,
+            round(up.get("ud_15", 1), 2) if up.get("ud_15") else 1.0,
+            "YES" if up.get("stage2") else "NO",
+            "🚀 YES" if up.get("breakout_today") else "NO",
+            f"{up.get('pivot_dist_pct', 0):+.1f}%",
+            f"{up.get('pct_from_52w_high', 0):+.1f}%",
+            "YES" if up.get("vol_dryup") else "NO",
+            f"{up.get('adr_pct', 0):.1f}%",
+            r.market,
+            r.sector or "",
+        ]
+        ws_up.append(row)
+        rn = ws_up.max_row
+        # Color score
+        sc_col_idx = up_headers.index("Score") + 1
+        sc_cell = ws_up.cell(row=rn, column=sc_col_idx)
+        sc_cell.fill = _score_fill(score)
+        sc_cell.font = Font(name="Calibri", bold=True, size=10, color="FFFFFF" if score >= 55 else "000000")
+        
+        # Color Risk %
+        risk_pct_val = up.get("risk_pct", 0)
+        risk_col_idx = up_headers.index("Risk %") + 1
+        risk_cell = ws_up.cell(row=rn, column=risk_col_idx)
+        if risk_pct_val > 10:
+            risk_cell.font = Font(color="FF0000", bold=True) # Red if > 10% risk
+        elif risk_pct_val > 7:
+            risk_cell.font = Font(color="FF8C00") # Orange if > 7% risk
+        
+        # Color decision
+        dec_col_idx = up_headers.index("Decision") + 1
+        dec_cell = ws_up.cell(row=rn, column=dec_col_idx)
+        dec_cell.fill = _verdict_fill(decision)
+        dec_cell.font = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+        # Align
+        for col in range(1, len(up_headers) + 1):
+            cell = ws_up.cell(row=rn, column=col)
+            cell.border = _BORDER
+            cell.alignment = _CENTER if col != up_headers.index("Signals") + 1 else _LEFT
+
+    ws_up.freeze_panes = "A2"
+    ws_up.auto_filter.ref = f"A1:{get_column_letter(len(up_headers))}1"
+    _auto_width(ws_up)
+
+    # ── Sheet 5: Avoid / Weak ───────────────────────────────────────────
     ws3 = wb.create_sheet(title="Avoid - Weak")
     avoid_headers = ["Ticker", "Name", "Market", "Score", "Verdict", "Price", "RSI", "1M %", "3M %", "Key Reason"]
     ws3.append(avoid_headers)
@@ -725,7 +839,14 @@ def write_reports(reports: list, top_n: int = 15, blacklist: set[str] | None = N
 
     xlsx_path = REPORTS_DIR / f"report_{today}.xlsx"
     wb = render_excel(reports, top_n=top_n, blacklist=blacklist, regime_data=regime_data)
-    wb.save(str(xlsx_path))
+    try:
+        wb.save(str(xlsx_path))
+    except PermissionError:
+        # If file is open/locked, create a version with a timestamp
+        ts = datetime.now().strftime("%H%M%S")
+        xlsx_path = REPORTS_DIR / f"report_{today}_{ts}.xlsx"
+        print(f"WARNING: Primary Excel file is locked. Saving to: {xlsx_path.name}")
+        wb.save(str(xlsx_path))
 
     return md_path, json_path, xlsx_path
 

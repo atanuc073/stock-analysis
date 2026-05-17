@@ -1,0 +1,50 @@
+﻿======================================================================
+BACKTEST ANALYSIS (2021-01-01 -> 2025-12-31)
+======================================================================
+Equity curve columns: ['Date', 'Equity', 'Cash', 'MarketValue', 'OpenPositions', 'date']
+
+First significant move: 2021-10-28 (-2.0%)
+First investment (cash < 95%): 2021-10-25
+Equity curve error: 'charmap' codec can't encode character '\u20b9' in position 20: character maps to <undefined>
+
+--- Trades by Year ---
+  2021: 23 buys, 12 sells
+  2022: 14 buys, 54 sells
+  2023: 60 buys, 85 sells
+  2024: 28 buys, 59 sells
+  2025: 41 buys, 87 sells
+
+--- Stop Loss Trades ---
+Total stop losses: 107 / 297 sells (36.0%)
+Avg stop loss: -9.34%
+Median stop loss: -11.47%
+  2021: 9 stops, avg -10.7%
+  2022: 18 stops, avg -11.6%
+  2023: 33 stops, avg -9.6%
+  2024: 17 stops, avg -4.5%
+  2025: 30 stops, avg -10.0%
+
+======================================================================
+DAILY REPORT ANALYSIS (2026-05-13)
+======================================================================
+Total stocks analyzed: 947
+Stocks with ATR in technical data: YES
+
+--- Top 10 Stocks: Price vs ATR Stop vs Hard Stop ---
+Symbol          Price      ATR   ATR Stop  Hard Stop Final Stop   Stop %  Score
+----------------------------------------------------------------------------------
+AU             104.33     4.74      90.11      85.55      90.11   -13.6%   72.6
+NEM            119.69     4.97     104.79      98.15     104.79   -12.4%   69.6
+SCCO           188.85     8.17     164.34     154.86     164.34   -13.0%   68.0
+MO              69.89     1.93      64.11      57.31      64.11    -8.3%   66.4
+EOG            134.13     3.58     123.39     109.99     123.39    -8.0%   65.6
+EVR            340.98    12.64     303.06     279.60     303.06   -11.1%   65.6
+GILD           134.94     3.32     124.98     110.65     124.98    -7.4%   65.2
+RRC             40.90     1.16      37.42      33.54      37.42    -8.5%   65.2
+CRUS           166.47     6.94     145.66     136.51     145.66   -12.5%   65.1
+EXEL            49.46     1.71      44.33      40.56      44.33   -10.4%   64.6
+
+--- Verdict Distribution ---
+  HOLD: 751
+  REDUCE: 143
+  BUY: 53

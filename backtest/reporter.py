@@ -38,7 +38,7 @@ def write_excel(result: BacktestResult, stats: PerformanceStats,
          "Cost": round(t.cost, 2), "Net": round(t.net_value, 0),
          "PnL_Abs": round(t.pnl_abs, 0), "PnL_%": round(t.pnl_pct, 2),
          "Days_Held": t.days_held, "Exit_Type": t.exit_type or "",
-         "Score_Entry": round(t.score_at_entry, 1), "Reason": t.reason}
+         "Score_Entry": round(t.uptrend_score_at_entry if result.config.uptrend_mode else t.score_at_entry, 1), "Reason": t.reason}
         for t in result.trades
     ])
 

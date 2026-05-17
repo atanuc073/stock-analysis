@@ -10,12 +10,12 @@ from .models import Position, TierLevel, ExitSignal, ExitType, PositionStatus
 # ── Configuration (overridable via constructor) ──────────────────────────────
 DEFAULT_TIERS = (
     # (pct_gain, sell_fraction, new_stop_pct_relative_to_entry)
-    (0.22, 1 / 3, 0.0),     # T1 — sell 33%, move stop to break-even
-    (0.38, 1 / 3, 0.18),    # T2 — sell 33%, lock +18%
+    (0.22, 0.33, 0.0),     # T1 — sell 33%, move stop to break-even
+    (0.50, 0.33, 0.25),    # T2 — sell 33%, lock +25%
 )
 DEFAULT_ATR_STOP_MULT = 3.0
 DEFAULT_HARD_STOP_PCT = 0.18         # cap per-position loss at 18% (give trades room)
-DEFAULT_TRAILING_PCT = 0.18          # trail 18% off peak after T2
+DEFAULT_TRAILING_PCT = 0.25          # trail 25% off peak after T2
 DEFAULT_TIME_STOP_DAYS = 365
 DEFAULT_TIME_STOP_BAND = (-0.05, 0.10)  # if return between -5% and +10% at time-stop, exit
 DEFAULT_THESIS_BREAK_SCORE = 50.0
@@ -47,6 +47,7 @@ class PositionFactory:
         sector: str = "",
         market: str = "IN",
         score: float = 0.0,
+        uptrend_score: float = 0.0,
         entry_date: Optional[str] = None,
     ) -> Position:
         if qty <= 0:
@@ -83,6 +84,7 @@ class PositionFactory:
             sector=sector,
             market=market,
             score_at_entry=score,
+            uptrend_score_at_entry=uptrend_score,
         )
 
 
@@ -106,6 +108,7 @@ class ExitConfig:
     #   2/3 mixed   -> default tier behaviour
     #   0-1/3 weak  -> sell more aggressively + tighter stop
     adaptive_tiers: bool = DEFAULT_ADAPTIVE_TIERS
+    trail_stop_pct: Optional[float] = None  # continuous trailing stop % from peak (e.g. 0.15 for 15%)
 
 
 class ExitEvaluator:
@@ -262,9 +265,15 @@ class ExitEvaluator:
         )
 
     @staticmethod
-    def update_peak(position: Position, current_price: float) -> None:
+    def update_peak(position: Position, current_price: float, trail_pct: Optional[float] = None) -> None:
         if current_price > position.peak_price:
             position.peak_price = current_price
+        
+        # Continuous trailing stop-loss from peak price
+        if trail_pct is not None and trail_pct > 0:
+            new_stop = position.peak_price * (1 - trail_pct)
+            if new_stop > position.stop_price:
+                position.stop_price = new_stop
 
     @staticmethod
     def _tier_strength(history, current_price: float) -> int:

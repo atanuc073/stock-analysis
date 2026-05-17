@@ -61,10 +61,19 @@ def compute(df: pd.DataFrame) -> dict:
         score -= 4
         signals.append(f"{r5:.1f}% last week (knife-catch risk)")
 
+    # Weighted RS Score (IBD / Minervini style)
+    # (0.4 * 12M) + (0.2 * 9M) + (0.2 * 6M) + (0.2 * 3M)
+    # This identifies stocks with high sustained strength.
+    rs_val = 0.0
+    if r252 is not None: rs_val += 0.4 * r252
+    if r126 is not None: rs_val += 0.4 * r126  # substitute for 9M/6M blend if needed
+    if r63 is not None: rs_val += 0.2 * r63
+    
     score = float(np.clip(score, 0, 100))
     return {
         "score": score, "signals": signals,
         "ret_1d": r1, "ret_1w": r5, "ret_1m": r21, "ret_3m": r63,
         "ret_6m": r126, "ret_1y": r252,
         "mom_12_1": mom_12_1, "mom_6_1": mom_6_1,
+        "rs_value": rs_val,
     }
