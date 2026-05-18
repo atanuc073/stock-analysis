@@ -739,10 +739,13 @@ class BacktestEngine:
         otherwise (intraday breach), the stop would trigger near the stop.
         Skipped on shock days (handled by `shock_vix_jump` suppression).
         """
+        from portfolio.lifecycle import _effective_stop_price
         for sym, pos in list(self.positions.items()):
             if pos.status == PositionStatus.CLOSED or pos.qty_open <= 0:
                 continue
-            stop = float(pos.stop_price or 0.0)
+            # Honour the wide-ATR floor for the first N days after entry,
+            # otherwise the intraday gap path would defeat the loose stop.
+            stop = float(_effective_stop_price(pos, asof.date()) or 0.0)
             if stop <= 0:
                 continue
             hd = self.data.get(sym)
@@ -894,22 +897,42 @@ class BacktestEngine:
         elif pos.qty_original > pos.qty_open:
             pos.status = PositionStatus.PARTIALLY_CLOSED
 
+        # Re-label a STOP_LOSS exit when prior tier/trail ratchets had already
+        # raised the stop above breakeven. The "stop" being hit now is really
+        # the profit-lock from an earlier tier, not a real loss. Reporting it
+        # as STOP_LOSS pollutes the loss bucket and inflates stop counts.
+        #   - Tier 2 triggered  → label TIER_2
+        #   - Tier 1 triggered  → label TIER_1
+        #   - Trail active (stop > entry, no tiers yet) → label TRAILING
+        effective_exit_type = sig.exit_type
+        if sig.exit_type == ExitType.STOP_LOSS:
+            t2_hit = len(pos.tiers) >= 2 and pos.tiers[1].triggered
+            t1_hit = len(pos.tiers) >= 1 and pos.tiers[0].triggered
+            if t2_hit:
+                effective_exit_type = ExitType.TIER_2
+            elif t1_hit:
+                effective_exit_type = ExitType.TIER_1
+            elif pos.stop_price > pos.entry_price:
+                # Stop was ratcheted above entry without a tier hit ⇒ trailing.
+                effective_exit_type = ExitType.TRAILING
+
         self.trades.append(BTTrade(
             symbol=pos.symbol, action="SELL", qty=qty, price=sig.current_price,
             gross_value=gross, cost=cost, net_value=net,
             timestamp=asof.isoformat(),
             sector=pos.sector, market=pos.market,
             reason=sig.reason,
-            exit_type=sig.exit_type.value,
+            exit_type=effective_exit_type.value,
             pnl_abs=pnl_abs, pnl_pct=pnl_pct,
             days_held=days_held,
             score_at_entry=pos.score_at_entry,
             uptrend_score_at_entry=pos.uptrend_score_at_entry,
             regime_label_at_entry=pos.regime_label_at_entry,
         ))
-        
-        # Record stop-loss date for re-entry lock
-        if sig.exit_type == ExitType.STOP_LOSS:
+
+        # Record stop-loss date for re-entry lock — only on REAL losses
+        # (i.e. unchanged STOP_LOSS, not a relabeled tier/trail profit-lock).
+        if effective_exit_type == ExitType.STOP_LOSS:
             self._last_stop_loss_date[pos.symbol] = asof
 
     def _close_all(self, asof: pd.Timestamp, prices: dict[str, float], reason: str) -> None:
