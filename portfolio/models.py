@@ -59,6 +59,14 @@ class Position:
     # Regime label at the time of entry (BULL/NEUTRAL_BULL/NEUTRAL/CAUTIOUS/BEAR).
     # Used by the backtest reporter to slice P&L by entry regime.
     regime_label_at_entry: str = ""
+    # Wide (loose) stop floor that applies only for the first N days after
+    # entry. While today <= ``wide_stop_until_date``, the effective stop used
+    # by ExitEvaluator is ``min(stop_price, wide_stop_price)`` — i.e. the
+    # wider of the two. After that date, the wide stop is ignored and only
+    # ``stop_price`` (with its tier/trail updates) governs exits.
+    # 0.0 / "" = feature disabled for this position (legacy behaviour).
+    wide_stop_price: float = 0.0
+    wide_stop_until_date: str = ""
 
     def to_dict(self) -> dict:
         d = asdict(self)

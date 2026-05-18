@@ -24,6 +24,22 @@ DEFAULT_HARD_STOP_BUFFER = 0.025  # if price < hard_stop * (1 - this), fire imme
 DEFAULT_ADAPTIVE_TIERS = True   # re-evaluate strength at each tier and adapt sell size
 
 
+def _effective_stop_price(position: "Position", today: date) -> float:
+    """Return the stop price actually used to evaluate exits today.
+
+    If the position carries a wide-ATR stop floor and we're still within
+    that window (today <= ``wide_stop_until_date``), return the wider
+    (lower) of the two stops: ``min(stop_price, wide_stop_price)``. This
+    lets tier/trail logic keep raising ``stop_price`` while preserving a
+    generous early-trade floor. Outside the window, use ``stop_price`` as-is.
+    """
+    if (position.wide_stop_price > 0
+            and position.wide_stop_until_date
+            and today.isoformat() <= position.wide_stop_until_date):
+        return min(position.stop_price, position.wide_stop_price)
+    return position.stop_price
+
+
 # ── Position factory ─────────────────────────────────────────────────────────
 @dataclass
 class EntryParameters:
@@ -50,6 +66,8 @@ class PositionFactory:
         uptrend_score: float = 0.0,
         entry_date: Optional[str] = None,
         regime_label: str = "",
+        wide_stop_price: float = 0.0,
+        wide_stop_until_date: str = "",
     ) -> Position:
         if qty <= 0:
             raise ValueError("qty must be positive")
@@ -87,6 +105,8 @@ class PositionFactory:
             score_at_entry=score,
             uptrend_score_at_entry=uptrend_score,
             regime_label_at_entry=regime_label,
+            wide_stop_price=wide_stop_price,
+            wide_stop_until_date=wide_stop_until_date,
         )
 
 
@@ -111,9 +131,15 @@ class ExitConfig:
     #   0-1/3 weak  -> sell more aggressively + tighter stop
     adaptive_tiers: bool = DEFAULT_ADAPTIVE_TIERS
     trail_stop_pct: Optional[float] = None  # continuous trailing stop % from peak (e.g. 0.15 for 15%)
-    
-    # Custom 20-day exit rules
-    strict_20d_mode: bool = True  # If True, enforces: exit unconditionally at 20 days, allow stop loss before/after
+
+    # Optional 20-day unconditional time-stop (disabled by default).
+    # When True, every position is force-exited on day 20 regardless of
+    # score/profit/trend. Mostly retained for A/B testing — the preferred
+    # "first-20-day" behaviour is now the wide-ATR stop floor configured
+    # per-position on the Position itself (see Position.wide_stop_price /
+    # wide_stop_until_date), which only widens the stop rather than capping
+    # holding period.
+    strict_20d_mode: bool = False
     no_stop_loss_first_20d: bool = False  # If True, ignores stop loss exits for the first 20 days
 
 
@@ -182,19 +208,28 @@ class ExitEvaluator:
             return [self._full_exit(position, current_price, ExitType.THESIS_BREAK,
                                     f"Score {current_score:.1f} < {self.cfg.thesis_break_score}")]
 
-        # 3) STOP LOSS — with N-bar confirmation + flash-crash protection
+        # 3) STOP LOSS — with N-bar confirmation + flash-crash protection.
+        # Use the effective stop, which honours the wide-ATR floor during
+        # the first N days after entry (Position.wide_stop_*).
+        effective_stop = _effective_stop_price(position, today)
         is_stop_active = not (self.cfg.no_stop_loss_first_20d and days_held < 20)
-        if is_stop_active and current_price <= position.stop_price:
+        if is_stop_active and current_price <= effective_stop:
             position.below_stop_streak += 1
             # Always fire on a deep breach (genuine breakdown, not noise)
-            deep_breach = current_price <= position.stop_price * (1 - self.cfg.hard_stop_buffer)
+            deep_breach = current_price <= effective_stop * (1 - self.cfg.hard_stop_buffer)
             confirmed = position.below_stop_streak >= self.cfg.stop_confirm_bars
             # Skip the soft-confirm path during a market-wide panic day,
             # but still honour a deep breach.
             if deep_breach or (confirmed and not regime_shock):
+                wide_active = (
+                    position.wide_stop_price > 0
+                    and position.wide_stop_until_date
+                    and today.isoformat() <= position.wide_stop_until_date
+                )
+                tag = " [wide]" if wide_active else ""
                 return [self._full_exit(
                     position, current_price, ExitType.STOP_LOSS,
-                    f"Price {current_price:.2f} ≤ stop {position.stop_price:.2f}"
+                    f"Price {current_price:.2f} ≤ stop {effective_stop:.2f}{tag}"
                     + (" (deep breach)" if deep_breach else f" ({position.below_stop_streak} bars)"),
                 )]
             # Otherwise: keep the streak counter armed; do NOT exit yet.
