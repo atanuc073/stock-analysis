@@ -301,18 +301,35 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshol
     
     new_pool = []
     rejected_quality: list[str] = []
-    # Regime-aware threshold bump: mirror backtest's regime_min_score_bumps.
-    # Weak regimes demand higher-conviction setups.
-    regime_label = getattr(regime, "label", "") if regime else ""
+    # Regime-aware threshold bump (per-market): mirror backtest's regime_min_score_bumps.
+    # Weak regimes demand higher-conviction setups. Per-market so US BULL is NOT
+    # throttled when IN is BEAR (and vice-versa).
     regime_bumps = {"BEAR": 15.0, "CAUTIOUS": 7.0, "NEUTRAL": 3.0}
-    effective_threshold = threshold + regime_bumps.get(regime_label, 0.0)
-    if effective_threshold != threshold:
-        log.info("Regime %s → threshold bumped %.1f → %.1f",
-                 regime_label, threshold, effective_threshold)
+    per_market_regimes = getattr(regime, "per_market", {}) if regime else {}
+    aggregate_label = getattr(regime, "label", "") if regime else ""
+
+    def _effective_threshold_for(market: str) -> float:
+        reg = per_market_regimes.get(market)
+        lbl = getattr(reg, "label", aggregate_label) if reg else aggregate_label
+        return threshold + regime_bumps.get(lbl, 0.0)
+
+    # Log effective thresholds once per market for transparency.
+    seen_markets: set[str] = set()
+    for r in reports:
+        mkt = getattr(r, "market", "")
+        if mkt and mkt not in seen_markets:
+            seen_markets.add(mkt)
+            eff = _effective_threshold_for(mkt)
+            reg = per_market_regimes.get(mkt)
+            lbl = getattr(reg, "label", aggregate_label) if reg else aggregate_label
+            if eff != threshold:
+                log.info("Regime %s:%s → threshold bumped %.1f → %.1f",
+                         mkt, lbl, threshold, eff)
+
     for r in reports:
         if r.symbol.upper() in held_set:
             continue
-        if r.composite_score < effective_threshold:
+        if r.composite_score < _effective_threshold_for(getattr(r, "market", "")):
             continue
         if r.symbol.upper() in blacklist:
             log.info("Skipping %s — re-entry lock (stopped out recently)", r.symbol)

@@ -81,12 +81,16 @@ class RegimeCheck:
     def evaluate(self, c: TradeCandidate, ctx: PortfolioContext) -> RiskResult:
         if ctx.regime is None:
             return RiskResult(True, "INFO", "no regime data")
-        mult = ctx.regime.allocation_multiplier
+        # Prefer per-market regime so one weak market doesn't throttle the other.
+        per = getattr(ctx.regime, "per_market", {}) or {}
+        reg = per.get(c.market, ctx.regime)
+        mult = reg.allocation_multiplier
+        tag = f"{c.market}:{reg.label}"
         if mult <= 0.2:
-            return RiskResult(False, "BLOCK", f"Regime {ctx.regime.label} — defensive only")
+            return RiskResult(False, "BLOCK", f"Regime {tag} — defensive only")
         sev = "INFO" if mult >= 0.85 else "WARN"
         return RiskResult(True, sev,
-                          f"Regime {ctx.regime.label} ({ctx.regime.score}/10) → size×{mult:.2f}",
+                          f"Regime {tag} ({reg.score}/10) → size×{mult:.2f}",
                           suggested_size_multiplier=mult)
 
 

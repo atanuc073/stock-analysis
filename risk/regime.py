@@ -123,7 +123,8 @@ class MultiMarketRegimeDetector:
 
     def detect(self) -> RegimeReport:
         reports = {m: d.detect() for m, d in self._detectors.items()}
-        # Use minimum allocation across markets — most defensive wins
+        # Aggregate label = worst-case (back-compat for callers that ignore market).
+        # Real per-market regimes live in `per_market` and should be preferred.
         worst = min(reports.values(), key=lambda r: r.allocation_multiplier)
         notes = []
         components = {}
@@ -136,4 +137,5 @@ class MultiMarketRegimeDetector:
             allocation_multiplier=worst.allocation_multiplier,
             components=components,
             notes=notes,
+            per_market=reports,
         )

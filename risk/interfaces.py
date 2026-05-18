@@ -33,6 +33,11 @@ class RegimeReport:
     allocation_multiplier: float     # 0.0..1.0
     components: dict[str, bool] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    # Per-market regime breakdown (populated by MultiMarketRegimeDetector).
+    # Keys are market codes (e.g. "IN", "US"); values are independent regimes.
+    # Consumers should prefer per_market[c.market] over the aggregate label so
+    # that one weak market doesn't throttle the other.
+    per_market: dict[str, "RegimeReport"] = field(default_factory=dict)
 
 
 @dataclass

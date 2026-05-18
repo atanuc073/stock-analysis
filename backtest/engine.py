@@ -408,14 +408,33 @@ class BacktestEngine:
                 continue
         return worst_r
 
-    def _regime_min_score(self) -> float:
-        """min_score bumped up by regime weakness."""
+    def _regime_min_score(self, market: str = "") -> float:
+        """min_score bumped up by regime weakness.
+
+        If `market` is given, use that market's own regime (independent).
+        Else fall back to worst-case across markets (legacy behaviour).
+        """
+        if market and self.cfg.use_regime and self._current_regime:
+            r = self._current_regime.get(market)
+            if r is not None:
+                bump = self.cfg.regime_min_score_bumps.get(r.label, 0.0)
+                return self.cfg.min_score + bump
         bump = self.cfg.regime_min_score_bumps.get(self._worst_regime_label(), 0.0)
         return self.cfg.min_score + bump
 
     def _regime_cash_floor_frac(self) -> float:
-        """Required cash as % of equity given current regime."""
-        return self.cfg.regime_cash_floor.get(self._worst_regime_label(), 0.0)
+        """Required cash as % of equity given current regime.
+
+        Uses the AVERAGE cash-floor across markets rather than worst-case so
+        a single bear market doesn't force the whole book to cash.
+        """
+        if not self.cfg.use_regime or not self._current_regime:
+            return self.cfg.regime_cash_floor.get("BULL", 0.0)
+        floors = [
+            self.cfg.regime_cash_floor.get(r.label, 0.0)
+            for r in self._current_regime.values()
+        ]
+        return (sum(floors) / len(floors)) if floors else 0.0
 
     def _regime_stop_mult(self, market: str) -> float:
         r = self._current_regime.get(market)
@@ -585,13 +604,13 @@ class BacktestEngine:
             if not scores:
                 return
 
-        # Filter on adjusted_score so the backtest matches the live ranking.
-        # If uptrend_mode is enabled, we use the pure momentum score.
+        # Min score is bumped up in weak regimes (capital preservation).
+        # Per-market so a strong US bull is not dragged down by an IN bear.
         score_attr = "uptrend_score" if self.cfg.uptrend_mode else "adjusted_score"
-        
-        # Min score is bumped up in weak regimes (capital preservation):
-        effective_min_score = self._regime_min_score()
-        scores = [s for s in scores if getattr(s, score_attr) >= effective_min_score]
+        scores = [
+            s for s in scores
+            if getattr(s, score_attr) >= self._regime_min_score(getattr(s, "market", ""))
+        ]
         if not scores:
             return
         scores.sort(key=lambda s: getattr(s, score_attr), reverse=True)
