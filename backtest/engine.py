@@ -47,7 +47,12 @@ class BacktestConfig:
     #  - At/within 0% of 52WH (no pullback): forward-30D avg only +0.48%
     # Allow buys at the high ONLY when a confirmed breakout fires today.
     max_extension_pct: float = 25.0            # max % stock can be extended above 200DMA (default 25%)
-    max_pct_from_52w_high: float = -1.5        # require ≥1.5% pullback from 52WH unless breakout_today (default -1.5)
+    # Top-chase audit (May'26): the -5% to 0% "near-high but not breakout"
+    # zone is the worst forward-return cohort (62% win, +0.85% avg fwd-30D)
+    # while deep pullbacks (-25% to -15%) returned +4.4% avg fwd-30D with
+    # 100% win-rate. Tightened from -1.5 → -5.0 to skip the noisy middle
+    # band; confirmed breakouts still get through via require_breakout_at_high.
+    max_pct_from_52w_high: float = -5.0        # require ≥5% pullback from 52WH unless breakout_today (default -5.0)
     require_breakout_at_high: bool = True      # if at the high, demand breakout_today=True from uptrend.compute
     # Relative-strength entry filter (IBD-style RS percentile rank, 12-1
     # momentum cross-sectional). 0 = disabled (legacy behaviour). 70 = only
@@ -739,13 +744,10 @@ class BacktestEngine:
         otherwise (intraday breach), the stop would trigger near the stop.
         Skipped on shock days (handled by `shock_vix_jump` suppression).
         """
-        from portfolio.lifecycle import _effective_stop_price
         for sym, pos in list(self.positions.items()):
             if pos.status == PositionStatus.CLOSED or pos.qty_open <= 0:
                 continue
-            # Honour the wide-ATR floor for the first N days after entry,
-            # otherwise the intraday gap path would defeat the loose stop.
-            stop = float(_effective_stop_price(pos, asof.date()) or 0.0)
+            stop = float(pos.stop_price or 0.0)
             if stop <= 0:
                 continue
             hd = self.data.get(sym)

@@ -134,6 +134,44 @@ def _candidate_from(report, ticker: TickerData) -> TradeCandidate:
     )
 
 
+def _passes_entry_quality(
+    report,
+    max_extension_pct: float = 25.0,
+    max_pct_from_52w_high: float = -5.0,
+    require_breakout_at_high: bool = True,
+) -> tuple[bool, str]:
+    """Mirror of the backtest engine's late-cycle / top-chase guards.
+
+    Backtest (May'26 audit) showed:
+      * stocks >25% above 200DMA: forward-30D returns turn negative
+      * stocks within 5% of 52WH (no breakout): +0.85% avg fwd-30D, 52% win
+      * deep pullbacks (-25% to -15% from 52WH): +4.41% avg fwd-30D, 71% win
+
+    Returns (passed, reason).
+    """
+    t = report.technical or {}
+    up = getattr(report, "uptrend_data", None) or getattr(report, "uptrend", None) or {}
+
+    # Extension above 200DMA
+    ext = t.get("pct_above_sma200")
+    if ext is None or ext == 0.0:
+        price = report.price or 0.0
+        s200 = up.get("sma200") if isinstance(up, dict) else None
+        ext = ((price / s200) - 1.0) * 100.0 if (s200 and price > 0) else 0.0
+    if ext > max_extension_pct:
+        return False, f"extended {ext:.1f}% above 200DMA (cap {max_extension_pct:.0f}%)"
+
+    # 52-week-high proximity (top-chase guard)
+    pct_from_high = up.get("pct_from_52w_high",
+                           t.get("pct_from_52w_high", -100.0))
+    breakout_today = bool(up.get("breakout_today", False))
+    if pct_from_high > max_pct_from_52w_high:
+        if not (require_breakout_at_high and breakout_today):
+            return False, (f"near 52WH ({pct_from_high:+.1f}%) with no "
+                           f"confirmed breakout")
+    return True, "ok"
+
+
 def _is_stopped_recently(symbol: str, trades: list, days: int = 30) -> bool:
     """Check if the symbol was stopped out in the last N days."""
     stop_dates = []
@@ -189,6 +227,14 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshol
             except Exception:
                 continue
     reports = [r for r in reports if r.composite_score > 0]
+    # Cross-sectional pass: layer universe-relative momentum/quality z-scores
+    # onto each report's adjusted_score. Mirrors backtest engine.py:561-563
+    # (apply_to_bt) so the live and backtest rankers see the same signal.
+    try:
+        from analysis.cross_sectional import apply as apply_cross_sectional
+        apply_cross_sectional(reports)
+    except Exception as e:
+        log.warning("cross-sectional pass failed: %s", e)
     # Sort by adjusted_score (universe-aware) when available, else composite.
     reports.sort(key=lambda r: getattr(r, "adjusted_score", r.composite_score), reverse=True)
 
@@ -254,15 +300,32 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshol
     }
     
     new_pool = []
+    rejected_quality: list[str] = []
+    # Regime-aware threshold bump: mirror backtest's regime_min_score_bumps.
+    # Weak regimes demand higher-conviction setups.
+    regime_label = getattr(regime, "label", "") if regime else ""
+    regime_bumps = {"BEAR": 15.0, "CAUTIOUS": 7.0, "NEUTRAL": 3.0}
+    effective_threshold = threshold + regime_bumps.get(regime_label, 0.0)
+    if effective_threshold != threshold:
+        log.info("Regime %s → threshold bumped %.1f → %.1f",
+                 regime_label, threshold, effective_threshold)
     for r in reports:
         if r.symbol.upper() in held_set:
             continue
-        if r.composite_score < threshold:
+        if r.composite_score < effective_threshold:
             continue
         if r.symbol.upper() in blacklist:
             log.info("Skipping %s — re-entry lock (stopped out recently)", r.symbol)
             continue
+        ok, reason = _passes_entry_quality(r)
+        if not ok:
+            rejected_quality.append(f"{r.symbol}: {reason}")
+            continue
         new_pool.append(r)
+
+    if rejected_quality:
+        log.info("Entry-quality gate rejected %d candidates: %s",
+                 len(rejected_quality), "; ".join(rejected_quality[:10]))
     
     new_pool = new_pool[:30]
 

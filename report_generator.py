@@ -67,14 +67,28 @@ def _select_top_picks(reports: list, top_n: int, sector_cap: int = TOP_PICKS_SEC
 
 def render_markdown(reports: list, top_n: int = 15, blacklist: set[str] | None = None) -> str:
     today = datetime.now().strftime("%Y-%m-%d")
-    
+
     # Apply blacklist filter to the pool before selecting top picks
     if blacklist:
         reports = [r for r in reports if r.symbol.upper() not in blacklist]
-        
+
     sorted_rs = sorted(reports, key=_score_of, reverse=True)
     top = _select_top_picks(reports, top_n)
     bottom = sorted_rs[-min(5, len(sorted_rs)):]
+
+    # Lazy import — same gate used by daily_runner buy decisions & Excel.
+    try:
+        from daily_runner import _passes_entry_quality
+    except Exception:
+        _passes_entry_quality = None  # type: ignore
+
+    def _eq(r) -> tuple[bool, str]:
+        if _passes_entry_quality is None:
+            return True, "n/a"
+        try:
+            return _passes_entry_quality(r)
+        except Exception:
+            return True, "n/a"
 
     lines = []
     lines.append(f"# Daily Stock Analysis — {today}\n")
@@ -82,8 +96,8 @@ def render_markdown(reports: list, top_n: int = 15, blacklist: set[str] | None =
 
     # Summary table
     lines.append("## Top Picks\n")
-    lines.append("| # | Ticker | Mkt | Name | Price | Stop | T1 (+22%) | Score | Verdict | 1D | 1M | 3M | RSI | P/E | Sector |")
-    lines.append("|---|--------|-----|------|-------|------|-----------|-------|---------|------|------|------|-----|-----|--------|")
+    lines.append("| # | Ticker | Mkt | Name | Price | Stop | T1 (+22%) | Score | EQ | Verdict | 1D | 1M | 3M | RSI | P/E | Sector |")
+    lines.append("|---|--------|-----|------|-------|------|-----------|-------|----|---------|------|------|------|-----|-----|--------|")
     for i, r in enumerate(top, 1):
         pe_val = r.fundamental.get('pe')
         pe_str = f"{pe_val:.1f}" if isinstance(pe_val, float) else (pe_val or '—')
@@ -91,9 +105,11 @@ def render_markdown(reports: list, top_n: int = 15, blacklist: set[str] | None =
         atr_stop = r.price - 3.0 * atr_val if atr_val > 0 else r.price * 0.82
         stop_price = max(atr_stop, r.price * 0.82)
         t1_price = r.price * 1.22
+        eq_ok, _eq_reason = _eq(r)
+        eq_cell = "✅" if eq_ok else "❌"
         lines.append(
             f"| {i} | **{r.symbol}** | {r.market} | {(r.name or '')[:24]} | "
-            f"{r.price:.2f} | {stop_price:.2f} | {t1_price:.2f} | **{r.composite_score:.1f}** | {r.verdict} | "
+            f"{r.price:.2f} | {stop_price:.2f} | {t1_price:.2f} | **{r.composite_score:.1f}** | {eq_cell} | {r.verdict} | "
             f"{_fmt_pct(r.momentum.get('ret_1d'))} | "
             f"{_fmt_pct(r.momentum.get('ret_1m'))} | {_fmt_pct(r.momentum.get('ret_3m'))} | "
             f"{r.technical.get('rsi', 0):.0f} | "
@@ -109,6 +125,9 @@ def render_markdown(reports: list, top_n: int = 15, blacklist: set[str] | None =
         stop_pct = (stop_price / r.price - 1) * 100 if r.price > 0 else -18.0
         t1_price = r.price * 1.22
         lines.append(f"### {r.symbol} — {r.name} ({r.market})  →  **{r.verdict}** (score {r.composite_score:.1f})\n")
+        eq_ok, eq_reason = _eq(r)
+        eq_line = "✅ pass" if eq_ok else f"❌ {eq_reason}"
+        lines.append(f"- **Entry Quality:** {eq_line}")
         lines.append(f"- **Price:** {r.price:.2f}  |  **Stop:** {stop_price:.2f} ({stop_pct:.1f}%)  |  **T1:** {t1_price:.2f} (+22%)  |  **Sector:** {r.sector or '—'}  |  **Mkt Cap:** {_fmt_money(r.fundamental.get('market_cap'))}")
         lines.append(f"- **Returns:** 1D {_fmt_pct(r.momentum.get('ret_1d'))}, 1W {_fmt_pct(r.momentum.get('ret_1w'))}, 1M {_fmt_pct(r.momentum.get('ret_1m'))}, 3M {_fmt_pct(r.momentum.get('ret_3m'))}, 1Y {_fmt_pct(r.momentum.get('ret_1y'))}")
         lines.append(f"- **Technical:** RSI {r.technical.get('rsi', 0):.1f} | Above 50DMA: {r.technical.get('above_sma50')} | Above 200DMA: {r.technical.get('above_sma200')} | {_fmt_pct(r.technical.get('pct_from_52w_high'), False)} from 52W high")
@@ -364,7 +383,7 @@ def render_excel(reports: list, top_n: int = 15, blacklist: set[str] | None = No
     headers = [
         "#", "Ticker", "Market", "Name", "Sector", "Price",
         "Stop (ATR)", "T1 (+22%)",
-        "Score", "Adj Score", "Verdict",
+        "Score", "Adj Score", "Verdict", "Entry Quality",
         "Tech", "Fund", "Mom", "Qual", "Inst Score", "U/D Ratio", "RS Rating", "Dist 200", "ADR (20)",
         "RSI", "% from 52WH", "Vol Ratio", ">200DMA",
         "1D %", "1W %", "1M %", "3M %",
@@ -380,8 +399,15 @@ def render_excel(reports: list, top_n: int = 15, blacklist: set[str] | None = No
     score_col = headers.index("Score") + 1
     adj_col = headers.index("Adj Score") + 1
     verdict_col = headers.index("Verdict") + 1
+    eq_col = headers.index("Entry Quality") + 1
     flags_col = headers.index("Risk Flags") + 1
     signals_col = headers.index("Signals") + 1
+
+    # Lazy import so report_generator stays independent if daily_runner moves.
+    try:
+        from daily_runner import _passes_entry_quality
+    except Exception:
+        _passes_entry_quality = None  # type: ignore
 
     for i, r in enumerate(sorted_rs, 1):
         f = r.fundamental or {}
@@ -395,7 +421,17 @@ def render_excel(reports: list, top_n: int = 15, blacklist: set[str] | None = No
         atr_val = t.get('atr', 0.0)
         atr_stop = r.price - 3.0 * atr_val if atr_val > 0 else r.price * 0.82
         stop_price = max(atr_stop, r.price * 0.82)
-        
+
+        # Entry-quality gate (mirror of backtest entry filters)
+        if _passes_entry_quality is not None:
+            try:
+                eq_ok, eq_reason = _passes_entry_quality(r)
+            except Exception:
+                eq_ok, eq_reason = True, "n/a"
+        else:
+            eq_ok, eq_reason = True, "n/a"
+        eq_label = "✅" if eq_ok else f"❌ {eq_reason}"
+
         row = [
             i,
             r.symbol,
@@ -408,6 +444,7 @@ def render_excel(reports: list, top_n: int = 15, blacklist: set[str] | None = No
             round(r.composite_score, 1),
             round(r.adjusted_score or r.composite_score, 1),
             r.verdict,
+            eq_label,
             round(t.get("score") or 0, 0),
             round(f.get("score") or 0, 0),
             round(m.get("score") or 0, 0),
@@ -456,6 +493,15 @@ def render_excel(reports: list, top_n: int = 15, blacklist: set[str] | None = No
         verdict_cell = ws.cell(row=row_num, column=verdict_col)
         verdict_cell.fill = _verdict_fill(r.verdict)
         verdict_cell.font = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+        # Color-code Entry Quality cell (green pass / red fail)
+        eq_cell = ws.cell(row=row_num, column=eq_col)
+        if eq_ok:
+            eq_cell.fill = PatternFill(start_color="2ECC71", end_color="2ECC71", fill_type="solid")
+            eq_cell.font = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+        else:
+            eq_cell.fill = PatternFill(start_color="E74C3C", end_color="E74C3C", fill_type="solid")
+            eq_cell.font = Font(name="Calibri", bold=True, size=9, color="FFFFFF")
+        eq_cell.alignment = _LEFT
         # Color-code component sub-scores (Tech, Fund, Mom, Qual, Inst)
         for sub_name in ["Tech", "Fund", "Mom", "Qual", "Inst Score"]:
             sub_col = headers.index(sub_name) + 1

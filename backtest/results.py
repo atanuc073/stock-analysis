@@ -319,24 +319,31 @@ def score_calibration(result: BacktestResult,
         df["bucket"] = pd.cut(df["score"], bins=bin_edges,
                               include_lowest=True, right=False)
     else:
-        # Quantile bins: guaranteed populated, surface true ranking power.
+        # Rank-based quantile bins. Bucketing on raw scores fails silently
+        # when the score distribution is tightly clustered (e.g. all trades
+        # score 99-101) — pd.qcut's `duplicates="drop"` collapses to a
+        # single bin. Ranking on the row's position breaks ties and
+        # guarantees N evenly-populated buckets, exposing whether the
+        # scorer actually ranks trades.
         if df["score"].nunique() <= 1:
-            df["bucket"] = pd.cut(df["score"],
-                                  bins=[df["score"].min() - 1, df["score"].max() + 1],
-                                  include_lowest=True)
+            df["bucket"] = "Q1"
         else:
+            ranks = df["score"].rank(method="first")
+            q_labels = [f"Q{i+1}" for i in range(n_quantiles)]
             try:
-                df["bucket"] = pd.qcut(df["score"], q=n_quantiles,
-                                       duplicates="drop", precision=1)
-                if df["bucket"].isnull().all():
-                    df["bucket"] = pd.cut(df["score"],
-                                          bins=[df["score"].min() - 1, df["score"].max() + 1],
-                                          include_lowest=True)
+                df["bucket"] = pd.qcut(ranks, q=n_quantiles, labels=q_labels)
             except ValueError:
-                # Too few unique scores — fall back to a single bucket
-                df["bucket"] = pd.cut(df["score"],
-                                      bins=[df["score"].min() - 1, df["score"].max() + 1],
-                                      include_lowest=True)
+                df["bucket"] = "Q1"
+        # Surface the actual score range per bucket so the table is readable.
+        ranges = (df.groupby("bucket", observed=True)["score"]
+                    .agg(["min", "max"])
+                    .round(2))
+        ranges.index = ranges.index.astype(str)
+        bucket_strs = df["bucket"].astype(str)
+        df["bucket"] = bucket_strs + bucket_strs.map(
+            lambda b: f" [{ranges.loc[b, 'min']}-{ranges.loc[b, 'max']}]"
+            if b in ranges.index else ""
+        )
 
     grp = df.groupby("bucket", observed=True).agg(
         Trades=("pnl_pct", "count"),

@@ -112,15 +112,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-positions", type=int, default=12)
     p.add_argument("--max-extension", type=float, default=25.0,
                    help="Max extension above 200DMA to buy (default 25.0). "
-                        "Data shows fwd-30D turns negative above ~25%.")
+                        "Data shows fwd-30D turns negative above ~25%%.")
     p.add_argument("--max-from-52wh", type=float, default=-1.5,
                    help="Require at least this %% pullback from 52w high "
-                        "(default -1.5; e.g. -3 forces ≥3%% pullback). "
+                        "(default -1.5; e.g. -3 forces >=3%% pullback). "
                         "At-the-high entries bypass this only on a confirmed breakout.")
     p.add_argument("--allow-buy-at-high", action="store_true",
                    help="Allow buys at 52WH without requiring a fresh breakout signal.")
     p.add_argument("--min-rs-pct", type=float, default=0.0,
-                   help="Require RS percentile rank ≥ this (0-100, default 0 = no hard filter; "
+                   help="Require RS percentile rank >= this (0-100, default 0 = no hard filter; "
                         "try 70 for leaders-only). RS score bump is always applied either way.")
     p.add_argument("--max-sector-weight", type=float, default=0.30,
                    help="Max sector concentration weight (default 0.30)")
@@ -148,14 +148,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="Disable regime-aware sizing (default: enabled)")
     p.add_argument("--regime-skip-below", default="BEAR",
                    choices=["BEAR", "CAUTIOUS", "NEUTRAL", "NEUTRAL_BULL", "BULL"],
-                   help="Skip new entries when regime label ≤ this (default BEAR)")
+                   help="Skip new entries when regime label <= this (default BEAR)")
     p.add_argument("--sip-amount", type=float, default=0.0,
                    help="SIP amount per month (INR). 0 = lumpsum mode (default)")
     p.add_argument("--sip-day", type=int, default=13,
                    help="Day of month to inject SIP (default 13). Falls to next "
                         "trading day if non-trading.")
     p.add_argument("--trail-stop-pct", type=float, default=None,
-                   help="Continuous trailing stop-loss from entry by N% (e.g. 15 for 15%)")
+                   help="Continuous trailing stop-loss from entry by N%% (e.g. 15 for 15%%)")
     p.add_argument("--transaction-cost-bps", type=float, default=0.0,
                    help="Transaction cost in bps (each side, one-way)")
     p.add_argument("--slippage-bps", type=float, default=0.0,
@@ -264,15 +264,15 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 70)
     sip_active = bool(result.contributions) and result.config.sip_amount > 0
     if sip_active:
-        print(f"Mode              : SIP ₹{result.config.sip_amount:,.0f}/month (day {result.config.sip_day_of_month})")
-        print(f"Total Invested    : ₹{stats.total_invested:,.0f}  ({stats.n_contributions} contributions)")
-        print(f"Final Equity      : ₹{stats.final_equity:,.0f}")
+        print(f"Mode              : SIP Rs.{result.config.sip_amount:,.0f}/month (day {result.config.sip_day_of_month})")
+        print(f"Total Invested    : Rs.{stats.total_invested:,.0f}  ({stats.n_contributions} contributions)")
+        print(f"Final Equity      : Rs.{stats.final_equity:,.0f}")
         print(f"Total Return      : {stats.total_return_pct:+.2f}%")
         print(f"XIRR (annualized) : {stats.xirr_pct:+.2f}%")
     else:
         print(f"Mode              : Lumpsum")
-        print(f"Initial Capital   : ₹{stats.initial_capital:,.0f}")
-        print(f"Final Equity      : ₹{stats.final_equity:,.0f}")
+        print(f"Initial Capital   : Rs.{stats.initial_capital:,.0f}")
+        print(f"Final Equity      : Rs.{stats.final_equity:,.0f}")
         print(f"Total Return      : {stats.total_return_pct:+.2f}%")
         print(f"CAGR              : {stats.cagr_pct:+.2f}%")
     print(f"Max Drawdown      : {stats.max_drawdown_pct:.2f}%")

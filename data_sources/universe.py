@@ -27,6 +27,26 @@ def sp500_tickers() -> list[str]:
 
 
 @lru_cache(maxsize=1)
+def sp400_tickers() -> list[str]:
+    """Scrape S&P MidCap 400 constituents from Wikipedia."""
+    try:
+        import requests
+        from io import StringIO
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) StockAnalysis/1.0"}
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        tables = pd.read_html(StringIO(resp.text))
+        df = tables[0]
+        # Yahoo uses '-' instead of '.' (e.g., BRK.B -> BRK-B)
+        return [s.replace(".", "-") for s in df["Symbol"].tolist()]
+    except Exception as e:
+        log.warning("S&P 400 fetch failed: %s — falling back to static list", e)
+        return ["AA", "AAL", "AAON", "ACI", "ACM", "ADC", "AEIS", "AFG", "AGCO", "AHR"]
+
+
+
+@lru_cache(maxsize=1)
 def nifty500_tickers() -> list[str]:
     """Fetch Nifty 500 constituents from NSE archives CSV."""
     url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
@@ -101,8 +121,8 @@ def russell1000_tickers() -> list[str]:
             raise ValueError("no tickers parsed")
         return out
     except Exception as e:
-        log.warning("Russell 1000 fetch failed: %s — falling back to S&P 500", e)
-        return sp500_tickers()
+        log.warning("Russell 1000 fetch failed: %s — falling back to S&P 500 + S&P MidCap 400", e)
+        return list(dict.fromkeys(sp500_tickers() + sp400_tickers()))
 
 
 
