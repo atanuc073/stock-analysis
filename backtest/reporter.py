@@ -15,6 +15,7 @@ from .results import (
     benchmark_sip,
     score_calibration,
     top_chase_diagnostic,
+    regime_breakdown,
 )
 
 log = logging.getLogger(__name__)
@@ -134,6 +135,9 @@ def write_excel(result: BacktestResult, stats: PerformanceStats,
         calib = score_calibration(result)
         if not calib.empty:
             calib.to_excel(w, sheet_name="Score_Calibration", index=False)
+        regime_df = regime_breakdown(result)
+        if not regime_df.empty:
+            regime_df.to_excel(w, sheet_name="By_Regime", index=False)
         # Top-chase diagnostic (only if historical data is provided)
         if data is not None:
             tc = top_chase_diagnostic(result, data)
@@ -280,10 +284,18 @@ def write_markdown(result: BacktestResult, stats: PerformanceStats, path: Path,
     calib = score_calibration(result)
     if not calib.empty:
         L.append("\n## 🎯 Score Calibration (does the scorer actually predict returns?)\n")
-        L.append("If `AvgPnL_Pct` and `WinRate_Pct` increase monotonically with score "
-                 "bucket, the scorer is real signal. If flat, it's noise above the "
-                 "threshold — consider lowering `min_score` or re-weighting components.\n")
+        L.append("Buckets are **quantile-based** (each bucket holds ~equal trades). "
+                 "If `AvgPnL_Pct` / `WinRate_Pct` rise monotonically with bucket, the "
+                 "scorer ranks trades correctly. Flat = noise above the threshold.\n")
         L.append(calib.to_markdown(index=False))
+
+    # Per-regime P&L — are returns concentrated in one regime?
+    regime_df = regime_breakdown(result)
+    if not regime_df.empty:
+        L.append("\n## 🌡️ P&L by Entry Regime\n")
+        L.append("_Profit concentrated in BULL only = regime-conditional bet. "
+                 "Steady across regimes = genuine all-weather alpha._\n")
+        L.append(regime_df.to_markdown(index=False))
 
     # Top-chase diagnostic — are we buying near tops?
     if data is not None:

@@ -110,8 +110,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--rebalance-days", type=int, default=5,
                    help="Rebalance every N trading days (default 5 = weekly)")
     p.add_argument("--max-positions", type=int, default=12)
-    p.add_argument("--max-extension", type=float, default=40.0,
-                   help="Max extension above 200DMA to buy (default 40.0)")
+    p.add_argument("--max-extension", type=float, default=25.0,
+                   help="Max extension above 200DMA to buy (default 25.0). "
+                        "Data shows fwd-30D turns negative above ~25%.")
+    p.add_argument("--max-from-52wh", type=float, default=-1.5,
+                   help="Require at least this %% pullback from 52w high "
+                        "(default -1.5; e.g. -3 forces ≥3%% pullback). "
+                        "At-the-high entries bypass this only on a confirmed breakout.")
+    p.add_argument("--allow-buy-at-high", action="store_true",
+                   help="Allow buys at 52WH without requiring a fresh breakout signal.")
+    p.add_argument("--min-rs-pct", type=float, default=0.0,
+                   help="Require RS percentile rank ≥ this (0-100, default 0 = no hard filter; "
+                        "try 70 for leaders-only). RS score bump is always applied either way.")
     p.add_argument("--max-sector-weight", type=float, default=0.30,
                    help="Max sector concentration weight (default 0.30)")
     p.add_argument("--max-market-weight", type=float, default=0.70,
@@ -146,6 +156,10 @@ def main(argv: list[str] | None = None) -> int:
                         "trading day if non-trading.")
     p.add_argument("--trail-stop-pct", type=float, default=None,
                    help="Continuous trailing stop-loss from entry by N% (e.g. 15 for 15%)")
+    p.add_argument("--transaction-cost-bps", type=float, default=0.0,
+                   help="Transaction cost in bps (each side, one-way)")
+    p.add_argument("--slippage-bps", type=float, default=0.0,
+                   help="Slippage in bps (each side, one-way)")
     args = p.parse_args(argv)
 
     output_dir = Path(args.output_dir) if args.output_dir else REPORTS_DIR / "backtest"
@@ -175,6 +189,9 @@ def main(argv: list[str] | None = None) -> int:
         max_positions=args.max_positions,
         max_sector_weight=args.max_sector_weight,
         max_extension_pct=args.max_extension,
+        max_pct_from_52w_high=args.max_from_52wh,
+        require_breakout_at_high=not args.allow_buy_at_high,
+        min_rs_pct=args.min_rs_pct,
         max_market_weight=args.max_market_weight,
         include_forecast=args.include_forecast,
         live_weights=not args.legacy_weights,
@@ -183,6 +200,8 @@ def main(argv: list[str] | None = None) -> int:
         sip_amount=args.sip_amount,
         sip_day_of_month=args.sip_day,
         uptrend_mode=args.uptrend,
+        transaction_cost_bps=args.transaction_cost_bps,
+        slippage_bps=args.slippage_bps,
     )
 
     # Pre-load benchmarks (also used as regime input)
@@ -241,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # 7) Console summary
     print("\n" + "=" * 70)
-    print(f"BACKTEST COMPLETE — {result.start} → {result.end}")
+    print(f"BACKTEST COMPLETE - {result.start} -> {result.end}")
     print("=" * 70)
     sip_active = bool(result.contributions) and result.config.sip_amount > 0
     if sip_active:

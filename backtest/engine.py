@@ -42,7 +42,20 @@ class BacktestConfig:
     base_position_weight: float = 0.10         # 10% of equity per new position
     max_position_weight: float = 0.15
     max_sector_weight: float = 0.30
-    max_extension_pct: float = 40.0            # max percentage stock can be extended above 200DMA (default 40%)
+    # Late-cycle / top-chase guards (data-driven defaults from May'26 audit):
+    #  - >25% above 200DMA: forward-30D returns turn negative & win-rate <50%
+    #  - At/within 0% of 52WH (no pullback): forward-30D avg only +0.48%
+    # Allow buys at the high ONLY when a confirmed breakout fires today.
+    max_extension_pct: float = 25.0            # max % stock can be extended above 200DMA (default 25%)
+    max_pct_from_52w_high: float = -1.5        # require ≥1.5% pullback from 52WH unless breakout_today (default -1.5)
+    require_breakout_at_high: bool = True      # if at the high, demand breakout_today=True from uptrend.compute
+    # Relative-strength entry filter (IBD-style RS percentile rank, 12-1
+    # momentum cross-sectional). 0 = disabled (legacy behaviour). 70 = only
+    # buy stocks in the top 30% of the candidate universe by momentum.
+    # Even when disabled as a hard filter, the RS pass still applies a
+    # +10/+7/+4/-5 score bump (see scoring.apply_rs_to_bt), so RS influences
+    # ranking either way.
+    min_rs_pct: float = 0.0
     max_market_weight: float = 0.70            # max country concentration weight (default 70%)
     transaction_cost_bps: float = 0.0          # 0 bps each side (0.00%)
     slippage_bps: float = 0.0                  # 0 bps slippage
@@ -239,6 +252,12 @@ class BacktestEngine:
 
             # 1b) Detect macro shock day (VIX spike + index drop)
             shock = self._is_shock_day(asof)
+
+            # 1c) Gap-aware stop check: if today's intraday LOW pierces the stop,
+            # close at the worse of (open, stop) instead of waiting for close.
+            # This catches MO-style -13% losses where the stop was breached on a gap.
+            if not shock:
+                self._process_gap_stops(asof, current_prices)
 
             # 2) Evaluate exits every day (tighter risk control)
             self._process_exits(asof, current_prices, evaluate_thesis=False,
@@ -456,6 +475,7 @@ class BacktestEngine:
                 days_held=days_held,
                 score_at_entry=pos.score_at_entry,
                 uptrend_score_at_entry=pos.uptrend_score_at_entry,
+                regime_label_at_entry=pos.regime_label_at_entry,
             ))
 
     # ── Entries ──────────────────────────────────────────────────────────────
@@ -494,18 +514,38 @@ class BacktestEngine:
                 
             if self._regime_blocks_entry(hd.market):
                 continue  # regime says: no new entries in this market
+            r_obj = self._current_regime.get(hd.market)
+            regime_lbl = r_obj.label if r_obj is not None else "NEUTRAL"
             s = score_at(hd, asof,
                          include_forecast=self.cfg.include_forecast,
                          live_weights=self.cfg.live_weights,
-                         weights_override=self.cfg.weights)
+                         weights_override=self.cfg.weights,
+                         regime_label=regime_lbl)
             if s is None:
                 continue
-            # Hard block: skip stocks extended >40% above 200DMA (late-cycle
-            # blow-off tops). The technical scorer already penalizes these
-            # but the score can still clear 65 via fundamentals/momentum.
-            ext = s.technical.get("pct_above_sma200", 0.0)
+            # Hard block 1: skip stocks extended too far above 200DMA (late-cycle
+            # blow-off tops). Try technical first; fall back to uptrend's own
+            # computation if technical didn't expose the metric.
+            ext = s.technical.get("pct_above_sma200")
+            if ext is None or ext == 0.0:
+                up = getattr(s, "uptrend_data", None) or {}
+                price = s.price or 0.0
+                s200 = (up.get("sma200") if isinstance(up, dict) else None)
+                if s200 and price > 0:
+                    ext = (price / s200 - 1.0) * 100.0
+                else:
+                    ext = 0.0
             if ext > self.cfg.max_extension_pct:
                 continue
+
+            # Hard block 2: top-chase guard. Skip entries at the 52-week high
+            # unless a confirmed breakout (volume + close-in-upper-range) fires.
+            up = getattr(s, "uptrend_data", None) or {}
+            pct_from_high = up.get("pct_from_52w_high", s.technical.get("pct_from_52w_high", -100.0))
+            breakout_today = bool(up.get("breakout_today", False))
+            if pct_from_high > self.cfg.max_pct_from_52w_high:
+                if not (self.cfg.require_breakout_at_high and breakout_today):
+                    continue
             scores.append(s)
         if not scores:
             return
@@ -521,6 +561,24 @@ class BacktestEngine:
             for s in scores:
                 if not hasattr(s, "adjusted_score") or not s.adjusted_score:
                     s.adjusted_score = s.score
+
+        # Cross-sectional RS percentile + sector strength (mirrors the live
+        # screener's uptrend.apply_rs). Updates s.uptrend_score and
+        # s.adjusted_score in place with RS decile bump + sector bump.
+        try:
+            from .scoring import apply_rs_to_bt
+            apply_rs_to_bt(scores)
+        except Exception as e:
+            log.warning("RS percentile pass failed: %s", e)
+
+        # Optional hard filter: require RS percentile >= configured floor.
+        # Default 0 = disabled; set min_rs_pct=70 to buy only leaders.
+        if self.cfg.min_rs_pct > 0:
+            scores = [s for s in scores
+                      if float((s.uptrend_data or {}).get("rs_pct", 0.0))
+                      >= self.cfg.min_rs_pct]
+            if not scores:
+                return
 
         # Filter on adjusted_score so the backtest matches the live ranking.
         # If uptrend_mode is enabled, we use the pure momentum score.
@@ -598,11 +656,18 @@ class BacktestEngine:
         cost = s.price * qty * (1 + self.cfg.cost_per_side)
         if cost > self.cash:
             return
+        # Capture current regime label BEFORE creating position so it gets
+        # persisted on the Position (used later by SELL trades + reporter).
+        regime_label = ""
+        r = self._current_regime.get(s.market)
+        if r is not None:
+            regime_label = r.label
         pos = self.factory.create(
             symbol=s.symbol, qty=qty, entry_price=s.price,
             atr=s.atr_value, sector=s.sector, market=s.market,
             score=s.adjusted_score, uptrend_score=s.uptrend_score,
             entry_date=asof.strftime("%Y-%m-%d"),
+            regime_label=regime_label,
         )
         
         # Override with "Smart Stop" if available
@@ -621,10 +686,6 @@ class BacktestEngine:
             pos.stop_price = new_stop
         self.positions[s.symbol] = pos
         self.cash -= cost
-        regime_label = ""
-        r = self._current_regime.get(s.market)
-        if r is not None:
-            regime_label = r.label
 
         score_attr = "uptrend_score" if self.cfg.uptrend_mode else "adjusted_score"
         self.trades.append(BTTrade(
@@ -669,6 +730,53 @@ class BacktestEngine:
         return out
 
     # ── Exits ────────────────────────────────────────────────────────────────
+    def _process_gap_stops(self, asof: pd.Timestamp,
+                           current_prices: dict[str, float]) -> None:
+        """Force a STOP_LOSS exit when today's intraday LOW pierced the stop.
+
+        Fills at the worse of (open_price, stop_price): if the stock gapped
+        below the stop, you'd realistically have been filled at the open;
+        otherwise (intraday breach), the stop would trigger near the stop.
+        Skipped on shock days (handled by `shock_vix_jump` suppression).
+        """
+        for sym, pos in list(self.positions.items()):
+            if pos.status == PositionStatus.CLOSED or pos.qty_open <= 0:
+                continue
+            stop = float(pos.stop_price or 0.0)
+            if stop <= 0:
+                continue
+            hd = self.data.get(sym)
+            if hd is None or hd.history.empty:
+                continue
+            try:
+                # Find today's bar (or last available <= asof)
+                idx = hd.history.index
+                if idx.tz is not None:
+                    bars = hd.history[idx.tz_localize(None) <= asof]
+                else:
+                    bars = hd.history[idx <= asof]
+                if bars.empty:
+                    continue
+                last = bars.iloc[-1]
+                low = float(last.get("Low", last.get("Close", 0.0)) or 0.0)
+                open_ = float(last.get("Open", last.get("Close", 0.0)) or 0.0)
+            except Exception:
+                continue
+            if low <= 0 or low > stop:
+                continue  # stop not breached today
+            # Fill at worse of open (gap down) or stop (intraday)
+            fill = stop if open_ >= stop else open_
+
+            from portfolio.models import ExitSignal
+            sig = ExitSignal(
+                symbol=sym, exit_type=ExitType.STOP_LOSS,
+                current_price=fill, suggested_qty=pos.qty_open,
+                reason=f"STOP_LOSS (gap-aware fill @ {fill:.2f}, stop {stop:.2f}, low {low:.2f})",
+            )
+            self._execute_exit(pos, sig, asof)
+            # Update price cache so downstream MV/sizing reflects exit
+            current_prices[sym] = fill
+
     def _is_shock_day(self, asof: pd.Timestamp) -> bool:
         """True if any tracked market shows a VIX spike + index gap-down today.
 
@@ -715,10 +823,13 @@ class BacktestEngine:
                 except Exception:
                     hist_slice = None
             if evaluate_thesis and hd is not None:
+                r_obj = self._current_regime.get(hd.market)
+                regime_lbl = r_obj.label if r_obj is not None else "NEUTRAL"
                 s = score_at(hd, asof,
                              include_forecast=False,
                              live_weights=self.cfg.live_weights,
-                             weights_override=self.cfg.weights)
+                             weights_override=self.cfg.weights,
+                             regime_label=regime_lbl)
                 if s:
                     # Use raw composite for thesis-break (cross-sectional
                     # context is unavailable for a single ticker on exit).
@@ -794,6 +905,7 @@ class BacktestEngine:
             days_held=days_held,
             score_at_entry=pos.score_at_entry,
             uptrend_score_at_entry=pos.uptrend_score_at_entry,
+            regime_label_at_entry=pos.regime_label_at_entry,
         ))
         
         # Record stop-loss date for re-entry lock

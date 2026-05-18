@@ -172,4 +172,31 @@ def analyze_batch(tickers: Iterable[TickerData]) -> list[StockReport]:
     for r in reports:
         if r.composite_score > 0:   # don't overwrite N/A errors
             r.verdict = _verdict(r.adjusted_score)
+
+    # 5. Entry-quality guards (mirror backtest engine's hard blocks).
+    # Downgrade BUY/STRONG BUY → HOLD when the chase filters would have
+    # blocked entry in the backtest. Keeps the live screener and the
+    # validated engine logic in sync.
+    #   - max extension above 200DMA: 25%
+    #   - require ≥1.5% pullback from 52WH unless breakout_today fires
+    MAX_EXTENSION_PCT = 25.0
+    MAX_PCT_FROM_52WH = -1.5
+    for r in reports:
+        if r.verdict not in ("BUY", "STRONG BUY"):
+            continue
+        ext = float(r.technical.get("pct_above_sma200") or 0.0)
+        pct_from_high = float(r.technical.get("pct_from_52w_high") or 0.0)
+        breakout_today = bool((r.uptrend or {}).get("breakout_today", False))
+        chase_extension = ext > MAX_EXTENSION_PCT
+        chase_high = (pct_from_high > MAX_PCT_FROM_52WH) and not breakout_today
+        if chase_extension or chase_high:
+            reasons = []
+            if chase_extension:
+                reasons.append(f"+{ext:.0f}% over 200DMA")
+            if chase_high:
+                reasons.append(f"{pct_from_high:+.1f}% from 52WH, no breakout")
+            r.verdict = "HOLD"
+            r.all_signals.append(
+                "⛔ Entry guard: " + ", ".join(reasons) + " — downgraded BUY→HOLD"
+            )
     return reports

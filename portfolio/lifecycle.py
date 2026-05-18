@@ -49,6 +49,7 @@ class PositionFactory:
         score: float = 0.0,
         uptrend_score: float = 0.0,
         entry_date: Optional[str] = None,
+        regime_label: str = "",
     ) -> Position:
         if qty <= 0:
             raise ValueError("qty must be positive")
@@ -85,6 +86,7 @@ class PositionFactory:
             market=market,
             score_at_entry=score,
             uptrend_score_at_entry=uptrend_score,
+            regime_label_at_entry=regime_label,
         )
 
 
@@ -109,6 +111,10 @@ class ExitConfig:
     #   0-1/3 weak  -> sell more aggressively + tighter stop
     adaptive_tiers: bool = DEFAULT_ADAPTIVE_TIERS
     trail_stop_pct: Optional[float] = None  # continuous trailing stop % from peak (e.g. 0.15 for 15%)
+    
+    # Custom 20-day exit rules
+    strict_20d_mode: bool = True  # If True, enforces: exit unconditionally at 20 days, allow stop loss before/after
+    no_stop_loss_first_20d: bool = False  # If True, ignores stop loss exits for the first 20 days
 
 
 class ExitEvaluator:
@@ -146,6 +152,26 @@ class ExitEvaluator:
         today = today or date.today()
         signals: list[ExitSignal] = []
 
+        # Calculate days held
+        try:
+            entry_dt = date.fromisoformat(position.entry_date)
+        except Exception:
+            entry_dt = today
+        days_held = (today - entry_dt).days
+
+        # Interpretation A: Strict 20-day time stop (unconditional exit)
+        if self.cfg.strict_20d_mode and days_held >= 20:
+            # Check if stop loss was hit on/after 20 days (to label the exit reason accurately)
+            if not self.cfg.no_stop_loss_first_20d and current_price <= position.stop_price:
+                return [self._full_exit(
+                    position, current_price, ExitType.STOP_LOSS,
+                    f"Price {current_price:.2f} ≤ stop {position.stop_price:.2f} on/after 20 days"
+                )]
+            return [self._full_exit(
+                position, current_price, ExitType.TIME_STOP,
+                f"Unconditional 20-day time stop reached ({days_held} days held)"
+            )]
+
         # 1) RED FLAG override — always exit fully
         if red_flags >= 2:
             return [self._full_exit(position, current_price, ExitType.RED_FLAG,
@@ -157,7 +183,8 @@ class ExitEvaluator:
                                     f"Score {current_score:.1f} < {self.cfg.thesis_break_score}")]
 
         # 3) STOP LOSS — with N-bar confirmation + flash-crash protection
-        if current_price <= position.stop_price:
+        is_stop_active = not (self.cfg.no_stop_loss_first_20d and days_held < 20)
+        if is_stop_active and current_price <= position.stop_price:
             position.below_stop_streak += 1
             # Always fire on a deep breach (genuine breakdown, not noise)
             deep_breach = current_price <= position.stop_price * (1 - self.cfg.hard_stop_buffer)

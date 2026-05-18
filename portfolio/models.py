@@ -56,6 +56,9 @@ class Position:
     # Number of consecutive bars (days) the price has closed at or below
     # stop_price. Used for 2-bar confirmation to avoid flash-crash whipsaws.
     below_stop_streak: int = 0
+    # Regime label at the time of entry (BULL/NEUTRAL_BULL/NEUTRAL/CAUTIOUS/BEAR).
+    # Used by the backtest reporter to slice P&L by entry regime.
+    regime_label_at_entry: str = ""
 
     def to_dict(self) -> dict:
         d = asdict(self)

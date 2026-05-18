@@ -285,13 +285,18 @@ def benchmark_sip(prices: pd.Series,
 
 
 def score_calibration(result: BacktestResult,
-                      bin_edges: list[float] | None = None) -> pd.DataFrame:
+                      bin_edges: list[float] | None = None,
+                      n_quantiles: int = 5) -> pd.DataFrame:
     """Bin closed trades by ``score_at_entry`` and report forward-return stats.
 
     Tells you whether the scorer is actually predictive — i.e. do trades that
     enter with score 80+ realize better returns than those entering at 70-75?
     A monotonic curve = scorer is signal. A flat curve = scorer is noise above
     the threshold.
+
+    By default we use **quantile-based** buckets (qcut), so all buckets are
+    guaranteed populated regardless of how the score distribution clusters.
+    Pass ``bin_edges`` to force fixed edges (legacy behavior).
     """
     if result.config.uptrend_mode:
         sells = [t for t in result.trades
@@ -302,9 +307,6 @@ def score_calibration(result: BacktestResult,
     if not sells:
         return pd.DataFrame()
 
-    if bin_edges is None:
-        bin_edges = [0, 60, 65, 70, 75, 80, 85, 100]
-
     df = pd.DataFrame([
         {"score": t.uptrend_score_at_entry if result.config.uptrend_mode else t.score_at_entry,
          "pnl_pct": t.pnl_pct,
@@ -312,8 +314,29 @@ def score_calibration(result: BacktestResult,
          "exit": t.exit_type or ""}
         for t in sells
     ])
-    df["bucket"] = pd.cut(df["score"], bins=bin_edges, include_lowest=True,
-                          right=False)
+
+    if bin_edges is not None:
+        df["bucket"] = pd.cut(df["score"], bins=bin_edges,
+                              include_lowest=True, right=False)
+    else:
+        # Quantile bins: guaranteed populated, surface true ranking power.
+        if df["score"].nunique() <= 1:
+            df["bucket"] = pd.cut(df["score"],
+                                  bins=[df["score"].min() - 1, df["score"].max() + 1],
+                                  include_lowest=True)
+        else:
+            try:
+                df["bucket"] = pd.qcut(df["score"], q=n_quantiles,
+                                       duplicates="drop", precision=1)
+                if df["bucket"].isnull().all():
+                    df["bucket"] = pd.cut(df["score"],
+                                          bins=[df["score"].min() - 1, df["score"].max() + 1],
+                                          include_lowest=True)
+            except ValueError:
+                # Too few unique scores — fall back to a single bucket
+                df["bucket"] = pd.cut(df["score"],
+                                      bins=[df["score"].min() - 1, df["score"].max() + 1],
+                                      include_lowest=True)
 
     grp = df.groupby("bucket", observed=True).agg(
         Trades=("pnl_pct", "count"),
@@ -331,6 +354,38 @@ def score_calibration(result: BacktestResult,
         grp["AvgPnL_Pct"] * (365.0 / grp["AvgDaysHeld"].replace(0, 1))
     ).round(2)
     return grp
+
+
+def regime_breakdown(result: BacktestResult) -> pd.DataFrame:
+    """Per-regime P&L breakdown — slices closed trades by entry regime.
+
+    Reveals whether returns come from alpha (consistent across regimes) or
+    regime luck (concentrated in one regime label). If BULL trades dominate
+    profit while CAUTIOUS/BEAR are flat or negative, the strategy is a
+    regime-conditional bet, not an all-weather one.
+    """
+    sells = [t for t in result.trades if t.action == "SELL"]
+    if not sells:
+        return pd.DataFrame()
+
+    df = pd.DataFrame([
+        {"regime": t.regime_label_at_entry or "Unknown",
+         "pnl_abs": t.pnl_abs, "pnl_pct": t.pnl_pct, "days": t.days_held}
+        for t in sells
+    ])
+    out = df.groupby("regime", observed=True).agg(
+        Trades=("pnl_pct", "count"),
+        AvgPnL_Pct=("pnl_pct", "mean"),
+        MedianPnL_Pct=("pnl_pct", "median"),
+        WinRate_Pct=("pnl_pct", lambda s: (s > 0).mean() * 100),
+        TotalPnL=("pnl_abs", "sum"),
+        AvgDaysHeld=("days", "mean"),
+    ).round(2).reset_index()
+    # Order by defensive→aggressive so the table reads top-down
+    order = ["BEAR", "CAUTIOUS", "NEUTRAL", "NEUTRAL_BULL", "BULL", "Unknown"]
+    out["__o"] = out["regime"].map({k: i for i, k in enumerate(order)}).fillna(99)
+    out = out.sort_values("__o").drop(columns="__o").reset_index(drop=True)
+    return out
 
 
 def _forward_return(history: pd.DataFrame, entry_ts: pd.Timestamp,
