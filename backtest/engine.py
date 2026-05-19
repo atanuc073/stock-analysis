@@ -72,7 +72,7 @@ class BacktestConfig:
     # Regime-driven de-risking of OPEN positions (not just new entries):
     # When regime label is at or below this floor, trim each open position
     # toward `regime_derisk_target_mult` of its current size on rebalance days.
-    regime_derisk_below: Optional[str] = "CAUTIOUS"   # None to disable
+    regime_derisk_below: Optional[str] = None   # None to disable
     regime_derisk_target_mult: float = 0.5            # keep 50% of size in CAUTIOUS/BEAR
     # ── Bear-market capital preservation knobs ─────────────────────────────
     # Raise min_score bar in weak regimes (only A+ setups get through):
@@ -88,9 +88,9 @@ class BacktestConfig:
     regime_cash_floor: dict = field(default_factory=lambda: {
         "BULL": 0.0,
         "NEUTRAL_BULL": 0.0,
-        "NEUTRAL": 0.10,
-        "CAUTIOUS": 0.30,
-        "BEAR": 0.60,
+        "NEUTRAL": 0.05,
+        "CAUTIOUS": 0.15,
+        "BEAR": 0.30,
     })
     # Tighten the per-position hard stop in weak regimes (multiplier on
     # configured hard_stop_pct; 1.0 = no change, 0.5 = half the loss tolerance).
