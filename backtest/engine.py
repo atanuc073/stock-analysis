@@ -568,8 +568,7 @@ class BacktestEngine:
             pct_from_high = up.get("pct_from_52w_high", s.technical.get("pct_from_52w_high", -100.0))
             breakout_today = bool(up.get("breakout_today", False))
             if pct_from_high > self.cfg.max_pct_from_52w_high:
-                if not (self.cfg.require_breakout_at_high and breakout_today):
-                    continue
+                continue
             scores.append(s)
         if not scores:
             return
