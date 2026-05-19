@@ -126,6 +126,49 @@ def russell1000_tickers() -> list[str]:
 
 
 
+def russell2000_tickers() -> list[str]:
+    """Fetch Russell 2000 constituents from raw GitHub CSV.
+    """
+    url = "https://raw.githubusercontent.com/ikoniaris/Russell2000/master/russell_2000_components.csv"
+    # Map known dual-class tickers.
+    DUAL_CLASS = {
+        "BRKB": "BRK-B", "BFB": "BF-B", "BFA": "BF-A",
+        "GOOGL": "GOOGL", "GOOG": "GOOG",
+    }
+    BLOCKLIST = {
+        "-", "USD", "CASH", "MARGIN", "MARGIN_USD",
+        "MMF",
+    }
+    try:
+        import requests
+        from io import StringIO
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) StockAnalysis/1.0"}
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        df = pd.read_csv(StringIO(resp.text))
+
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in df["Ticker"].dropna().astype(str):
+            t = raw.strip().upper()
+            if not t or t in BLOCKLIST:
+                continue
+            t = DUAL_CLASS.get(t, t)
+            t = t.replace(".", "-")
+            if t in seen:
+                continue
+            seen.add(t)
+            out.append(t)
+        if not out:
+            raise ValueError("no tickers parsed")
+        log.info("Loaded %d Russell 2000 tickers from GitHub", len(out))
+        return out
+    except Exception as e:
+        log.warning("Russell 2000 fetch failed: %s — falling back to S&P MidCap 400", e)
+        return sp400_tickers()
+
+
+
 def broad_universe() -> list[str]:
     return nifty500_tickers() + sp500_tickers()
 

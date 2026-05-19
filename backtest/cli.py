@@ -49,6 +49,13 @@ def _resolve_universe(name: str) -> list[str]:
         except Exception as e:
             log.warning("russell1000 universe unavailable (%s); falling back to watchlist", e)
             return WATCHLIST
+    if name == "russell2000":
+        try:
+            from data_sources.universe import russell2000_tickers
+            return russell2000_tickers()
+        except Exception as e:
+            log.warning("russell2000 universe unavailable (%s); falling back to watchlist", e)
+            return WATCHLIST
     if name == "sp500":
         try:
             from data_sources.universe import sp500_tickers
@@ -113,10 +120,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-extension", type=float, default=25.0,
                    help="Max extension above 200DMA to buy (default 25.0). "
                         "Data shows fwd-30D turns negative above ~25%%.")
-    p.add_argument("--max-from-52wh", type=float, default=-1.5,
+    p.add_argument("--max-from-52wh", type=float, default=-10.0,
                    help="Require at least this %% pullback from 52w high "
-                        "(default -1.5; e.g. -3 forces >=3%% pullback). "
-                        "At-the-high entries bypass this only on a confirmed breakout.")
+                        "(default -10.0; e.g. -3 forces >=3%% pullback). "
+                        "Hard reject — no breakout exception (May'26 validated config).")
     p.add_argument("--allow-buy-at-high", action="store_true",
                    help="Allow buys at 52WH without requiring a fresh breakout signal.")
     p.add_argument("--min-rs-pct", type=float, default=0.0,
@@ -146,9 +153,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="US smallcap benchmark (default Russell 2000: ^RUT)")
     p.add_argument("--no-regime", action="store_true",
                    help="Disable regime-aware sizing (default: enabled)")
-    p.add_argument("--regime-skip-below", default="BEAR",
+    p.add_argument("--regime-skip-below", default="CAUTIOUS",
                    choices=["BEAR", "CAUTIOUS", "NEUTRAL", "NEUTRAL_BULL", "BULL"],
-                   help="Skip new entries when regime label <= this (default BEAR)")
+                   help="Skip new entries when regime label <= this (default CAUTIOUS — "
+                        "May'26 audit showed CAUTIOUS trades contribute ~0% of P&L)")
     p.add_argument("--sip-amount", type=float, default=0.0,
                    help="SIP amount per month (INR). 0 = lumpsum mode (default)")
     p.add_argument("--sip-day", type=int, default=13,
@@ -160,6 +168,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="Transaction cost in bps (each side, one-way)")
     p.add_argument("--slippage-bps", type=float, default=0.0,
                    help="Slippage in bps (each side, one-way)")
+    p.add_argument("--warmup-days", type=int, default=252,
+                   help="Skip new entries for the first N trading days (default 252 = "
+                        "~1 year). Lets the regime detector accumulate enough history.")
     args = p.parse_args(argv)
 
     output_dir = Path(args.output_dir) if args.output_dir else REPORTS_DIR / "backtest"
@@ -202,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
         uptrend_mode=args.uptrend,
         transaction_cost_bps=args.transaction_cost_bps,
         slippage_bps=args.slippage_bps,
+        warmup_days=args.warmup_days,
     )
 
     # Pre-load benchmarks (also used as regime input)
