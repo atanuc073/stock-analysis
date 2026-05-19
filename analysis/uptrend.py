@@ -59,15 +59,19 @@ def _atr(df: pd.DataFrame, window: int = _ATR_WINDOW) -> pd.Series:
     return tr.rolling(window).mean()
 
 
-def _bbw_percentile(close: pd.Series) -> Optional[float]:
+def _bbw_percentile(df: pd.DataFrame) -> Optional[float]:
     """Return current Bollinger Band Width's percentile rank (0–100) over
     the trailing `_BB_LOOKBACK` days. Low percentile = squeeze."""
-    if len(close) < _BB_WINDOW + 30:
-        return None
-    sma = close.rolling(_BB_WINDOW).mean()
-    sd = close.rolling(_BB_WINDOW).std(ddof=0)
-    bbw = (4 * sd) / sma.replace(0, np.nan)
-    bbw = bbw.dropna()
+    if "bbw" in df:
+        bbw = df["bbw"].dropna()
+    else:
+        close = df["Close"]
+        if len(close) < _BB_WINDOW + 30:
+            return None
+        sma = close.rolling(_BB_WINDOW).mean()
+        sd = close.rolling(_BB_WINDOW).std(ddof=0)
+        bbw = (4 * sd) / sma.replace(0, np.nan)
+        bbw = bbw.dropna()
     if bbw.empty:
         return None
     window = bbw.tail(_BB_LOOKBACK)
@@ -106,6 +110,11 @@ def _vcp_score(df: pd.DataFrame) -> Optional[float]:
 def _ud_ratio(df: pd.DataFrame, window: int) -> Optional[float]:
     """Dollar-volume U/D ratio over `window` days, ATR-filtered to drop
     insignificant moves. Returns None if data insufficient."""
+    col = f"ud_{window}"
+    if col in df:
+        val = df[col].iloc[-1]
+        return float(val) if not pd.isna(val) else None
+        
     if len(df) < window + _ATR_WINDOW + 2:
         return None
     seg = df.tail(window + 1).copy()
@@ -126,6 +135,10 @@ def _ud_ratio(df: pd.DataFrame, window: int) -> Optional[float]:
 
 
 def _adr_pct(df: pd.DataFrame, window: int = 20) -> Optional[float]:
+    if "adr_pct" in df:
+        val = df["adr_pct"].iloc[-1]
+        return float(val) if not pd.isna(val) else None
+        
     if len(df) < window + 1:
         return None
     seg = df.tail(window)
@@ -191,9 +204,9 @@ def compute(df: pd.DataFrame, regime: str = "Neutral") -> dict:
         return {"score": 50.0, "signals": [], "stage2": False, "trend_template": 0}
 
     n = len(close)
-    sma50 = close.rolling(50).mean()
-    sma150 = close.rolling(min(150, n)).mean()
-    sma200 = close.rolling(min(200, n)).mean()
+    sma50 = df["sma50"] if "sma50" in df else close.rolling(50).mean()
+    sma150 = df["sma150"] if "sma150" in df else close.rolling(min(150, n)).mean()
+    sma200 = df["sma200"] if "sma200" in df else close.rolling(min(200, n)).mean()
 
     s50 = _safe_iloc(sma50, -1)
     s150 = _safe_iloc(sma150, -1)
@@ -226,7 +239,7 @@ def compute(df: pd.DataFrame, regime: str = "Neutral") -> dict:
     tt_count = int(sum(tt_checks.values()))
 
     # ── Volatility contraction & squeeze ───────────────────────────────
-    bbw_pct = _bbw_percentile(close)        # low = squeeze
+    bbw_pct = _bbw_percentile(df)        # low = squeeze
     vcp = _vcp_score(df)                    # high = tight
 
     # ── U/D ratio (accumulation proxy) ─────────────────────────────────

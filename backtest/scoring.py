@@ -52,14 +52,138 @@ class BacktestScore:
             self.uptrend_data = {}
 
 
+def _precompute_hd_series(hd: HistoricalData) -> None:
+    """Pre-compute all technical indicators Series on the full history once."""
+    close = hd.history["Close"]
+    vol = hd.history["Volume"]
+    high = hd.history["High"]
+    low = hd.history["Low"]
+    
+    import ta
+    import numpy as np
+    
+    # 1. RSI
+    rsi = ta.momentum.RSIIndicator(close, window=14).rsi()
+    
+    # 2. MACD
+    macd = ta.trend.MACD(close)
+    macd_line = macd.macd()
+    macd_sig = macd.macd_signal()
+    
+    # 3. SMAs
+    sma20 = close.rolling(20).mean()
+    sma50 = close.rolling(50).mean()
+    if len(close) >= 200:
+        sma200 = close.rolling(200).mean()
+    else:
+        sma200 = close.rolling(len(close) // 2).mean()
+        
+    # 4. Bollinger Bands
+    bb = ta.volatility.BollingerBands(close, window=20)
+    bb_pct = bb.bollinger_pband()
+    
+    # 5. ATR (14-day Average True Range series)
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        (high - low).abs(),
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    atr_series = tr.rolling(14).mean()
+    
+    # 6. Annualized Volatility (rolling 90-day annualized std of daily returns)
+    log_rets = np.log(close / close.shift(1))
+    vol_series = log_rets.rolling(90).std() * np.sqrt(252)
+    
+    # 7. Accumulation/Distribution metrics
+    up_mask = close > close.shift(1)
+    dn_mask = close < close.shift(1)
+    
+    # Rolling sum of up and down volume over 50 days
+    up_vol_50 = vol.where(up_mask, 0.0).rolling(50).sum()
+    dn_vol_50 = vol.where(dn_mask, 0.0).rolling(50).sum()
+    ud_ratio = up_vol_50 / dn_vol_50.replace(0.0, np.nan)
+    ud_ratio = ud_ratio.fillna(1.0)
+    
+    # Accumulation/Distribution net days (25-day)
+    vol_up = vol > vol.shift(1)
+    acc_days = (up_mask & vol_up).astype(float).rolling(25).sum()
+    dist_days = (dn_mask & vol_up).astype(float).rolling(25).sum()
+    net_acc = acc_days - dist_days
+    
+    # Chaikin Money Flow
+    cmf = ta.volume.ChaikinMoneyFlowIndicator(
+        high=high, low=low, close=close, volume=vol, window=20
+    ).chaikin_money_flow()
+    
+    hd._precomputed_series = {
+        "rsi": rsi,
+        "macd_line": macd_line,
+        "macd_sig": macd_sig,
+        "sma20": sma20,
+        "sma50": sma50,
+        "sma200": sma200,
+        "bb_pct": bb_pct,
+        "atr": atr_series,
+        "vol": vol_series,
+        "ud_ratio": ud_ratio,
+        "net_acc": net_acc,
+        "cmf": cmf,
+    }
+    
+    # Add columns directly to history for uptrend.py fast lookups
+    n = len(close)
+    hd.history["sma50"] = sma50
+    hd.history["sma150"] = close.rolling(min(150, n)).mean()
+    hd.history["sma200"] = sma200
+    
+    sma_bb = close.rolling(20).mean()
+    sd_bb = close.rolling(20).std(ddof=0)
+    hd.history["bbw"] = (4 * sd_bb) / sma_bb.replace(0, np.nan)
+    
+    vol_up = vol > vol.shift(1)
+    
+    # ATR-filtered Dollar-Volume U/D Ratios (from uptrend.py)
+    ret = close.pct_change()
+    dol_vol = close * vol
+    threshold = 0.25 * (atr_series / close)
+    sig = ret.abs() > threshold
+    
+    up_dol = dol_vol.where(sig & (ret > 0), 0.0)
+    dn_dol = dol_vol.where(sig & (ret < 0), 0.0)
+    
+    up_50 = up_dol.rolling(50).sum()
+    dn_50 = dn_dol.rolling(50).sum()
+    hd.history["ud_50"] = up_50 / dn_50.replace(0, np.nan)
+    hd.history["ud_50"] = hd.history["ud_50"].fillna(5.0)
+    
+    up_15 = up_dol.rolling(15).sum()
+    dn_15 = dn_dol.rolling(15).sum()
+    hd.history["ud_15"] = up_15 / dn_15.replace(0, np.nan)
+    hd.history["ud_15"] = hd.history["ud_15"].fillna(5.0)
+    
+    # ADR%
+    rng = (high - low) / close.replace(0, np.nan)
+    hd.history["adr_pct"] = rng.rolling(20).mean() * 100
+
+
+
 def _slice(hd: HistoricalData, asof: pd.Timestamp) -> pd.DataFrame:
     """Return history with index <= asof. Strips timezone for comparison."""
     idx = hd.history.index
     if idx.tz is not None:
-        sliced = hd.history[idx.tz_localize(None) <= asof]
+        sliced = hd.history[idx.tz_localize(None) <= asof].copy()
     else:
-        sliced = hd.history[idx <= asof]
+        sliced = hd.history[idx <= asof].copy()
+        
+    # Pre-compute indicators Series on full history once
+    if not hasattr(hd, "_precomputed_series"):
+        _precompute_hd_series(hd)
+        
+    sliced._parent_hd = hd
+    sliced._asof = asof
     return sliced
+
 
 
 def score_at(hd: HistoricalData, asof: pd.Timestamp,
@@ -170,6 +294,23 @@ def score_at(hd: HistoricalData, asof: pd.Timestamp,
         composite = 50.0
 
     price = float(hist["Close"].iloc[-1])
+    
+    # Fast lookup from cached Series
+    cache = hd._precomputed_series
+    asof_tz = asof
+    if cache["atr"].index.tz is not None and asof.tzinfo is None:
+        try:
+            asof_tz = asof.tz_localize(cache["atr"].index.tz)
+        except Exception:
+            asof_tz = asof.tz_localize("UTC").tz_convert(cache["atr"].index.tz)
+    elif cache["atr"].index.tz is None and asof.tzinfo is not None:
+        asof_tz = asof.tz_localize(None)
+        
+    atr_s = cache["atr"].loc[:asof_tz]
+    vol_s = cache["vol"].loc[:asof_tz]
+    atr_val = float(atr_s.iloc[-1]) if (not pd.isna(atr_s.iloc[-1])) else float(atr(hist) or 0.0)
+    vol_val = float(vol_s.iloc[-1]) if (not pd.isna(vol_s.iloc[-1])) else float(annualized_volatility(hist) or 0.30)
+    
     return BacktestScore(
         symbol=hd.symbol,
         market=hd.market,
@@ -182,8 +323,8 @@ def score_at(hd: HistoricalData, asof: pd.Timestamp,
         forecast=fcst,
         quality=qual,
         earnings_drift=edrift,
-        atr_value=float(atr(hist) or 0.0),
-        annual_vol=float(annualized_volatility(hist) or 0.30),
+        atr_value=atr_val,
+        annual_vol=vol_val,
         uptrend_score=up_score,
         uptrend_data=up_data,
         suggested_stop=s_stop,
@@ -193,10 +334,21 @@ def score_at(hd: HistoricalData, asof: pd.Timestamp,
 
 def price_at(hd: HistoricalData, asof: pd.Timestamp) -> Optional[float]:
     """Return the close price on/before asof. Used to update open positions."""
-    hist = _slice(hd, asof)
-    if hist.empty:
+    idx = hd.history.index
+    
+    asof_tz = asof
+    if idx.tz is not None and asof.tzinfo is None:
+        try:
+            asof_tz = asof.tz_localize(idx.tz)
+        except Exception:
+            asof_tz = asof.tz_localize("UTC").tz_convert(idx.tz)
+    elif idx.tz is None and asof.tzinfo is not None:
+        asof_tz = asof.tz_localize(None)
+        
+    loc = idx.searchsorted(asof_tz, side="right")
+    if loc == 0:
         return None
-    return float(hist["Close"].iloc[-1])
+    return float(hd.history["Close"].iloc[loc - 1])
 
 
 # ── Cross-sectional RS pass for the backtest ────────────────────────────────

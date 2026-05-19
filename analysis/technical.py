@@ -8,7 +8,7 @@ from config import RSI_OVERSOLD, RSI_OVERBOUGHT, VOLUME_SPIKE_MULT
 from analysis.indicators import atr
 
 
-def _compute_accumulation_score(df: pd.DataFrame) -> tuple[float, list[str], dict]:
+def _compute_accumulation_score(df: pd.DataFrame, ud_ratio=None, net_acc=None, cmf_v=None) -> tuple[float, list[str], dict]:
     """
     Calculate an 'Institutional Buy Probability' score (0-100).
     Based on:
@@ -19,30 +19,31 @@ def _compute_accumulation_score(df: pd.DataFrame) -> tuple[float, list[str], dic
     if len(df) < 50:
         return 50.0, [], {}
 
-    close = df["Close"]
-    vol = df["Volume"]
-    
-    # 1. U/D Volume Ratio (50-day)
-    # Ratio of volume on 'up' days vs 'down' days. > 1.0 is accumulation.
-    up_mask = close > close.shift(1)
-    dn_mask = close < close.shift(1)
-    up_vol = vol.where(up_mask).tail(50).sum()
-    dn_vol = vol.where(dn_mask).tail(50).sum()
-    ud_ratio = up_vol / dn_vol if dn_vol > 0 else 1.0
-    
-    # 2. Accumulation Days vs Distribution Days (25-day)
-    # Accumulation: Price UP + Volume > Prior Day
-    # Distribution: Price DOWN + Volume > Prior Day
-    vol_up = vol > vol.shift(1)
-    acc_days = (up_mask & vol_up).tail(25).sum()
-    dist_days = (dn_mask & vol_up).tail(25).sum()
-    net_acc = int(acc_days - dist_days)
-    
-    # 3. Chaikin Money Flow
-    cmf_indicator = ta.volume.ChaikinMoneyFlowIndicator(
-        high=df["High"], low=df["Low"], close=df["Close"], volume=df["Volume"], window=20
-    )
-    cmf_v = float(cmf_indicator.chaikin_money_flow().iloc[-1])
+    if ud_ratio is None or net_acc is None or cmf_v is None:
+        close = df["Close"]
+        vol = df["Volume"]
+        
+        # 1. U/D Volume Ratio (50-day)
+        # Ratio of volume on 'up' days vs 'down' days. > 1.0 is accumulation.
+        up_mask = close > close.shift(1)
+        dn_mask = close < close.shift(1)
+        up_vol = vol.where(up_mask).tail(50).sum()
+        dn_vol = vol.where(dn_mask).tail(50).sum()
+        ud_ratio = up_vol / dn_vol if dn_vol > 0 else 1.0
+        
+        # 2. Accumulation Days vs Distribution Days (25-day)
+        # Accumulation: Price UP + Volume > Prior Day
+        # Distribution: Price DOWN + Volume > Prior Day
+        vol_up = vol > vol.shift(1)
+        acc_days = (up_mask & vol_up).tail(25).sum()
+        dist_days = (dn_mask & vol_up).tail(25).sum()
+        net_acc = int(acc_days - dist_days)
+        
+        # 3. Chaikin Money Flow
+        cmf_indicator = ta.volume.ChaikinMoneyFlowIndicator(
+            high=df["High"], low=df["Low"], close=df["Close"], volume=df["Volume"], window=20
+        )
+        cmf_v = float(cmf_indicator.chaikin_money_flow().iloc[-1])
 
     score = 50.0
     signals = []
@@ -80,15 +81,54 @@ def compute(df: pd.DataFrame) -> dict:
     close = df["Close"]
     vol = df["Volume"]
 
-    rsi = ta.momentum.RSIIndicator(close, window=14).rsi()
-    macd = ta.trend.MACD(close)
-    macd_line = macd.macd()
-    macd_sig = macd.macd_signal()
-    sma20 = close.rolling(20).mean()
-    sma50 = close.rolling(50).mean()
-    sma200 = close.rolling(200).mean() if len(close) >= 200 else close.rolling(len(close) // 2).mean()
-    bb = ta.volatility.BollingerBands(close, window=20)
-    bb_pct = bb.bollinger_pband()
+    # Fast cached lookup for backtesting to avoid massive ta library overhead
+    if hasattr(df, "_parent_hd") and hasattr(df, "_asof"):
+        hd = df._parent_hd
+        asof = df._asof
+        cache = hd._precomputed_series
+        
+        # Align timezone of asof to match cache series index
+        asof_tz = asof
+        if cache["rsi"].index.tz is not None and asof.tzinfo is None:
+            try:
+                asof_tz = asof.tz_localize(cache["rsi"].index.tz)
+            except Exception:
+                asof_tz = asof.tz_localize("UTC").tz_convert(cache["rsi"].index.tz)
+        elif cache["rsi"].index.tz is None and asof.tzinfo is not None:
+            asof_tz = asof.tz_localize(None)
+            
+        rsi = cache["rsi"].loc[:asof_tz]
+        macd_line = cache["macd_line"].loc[:asof_tz]
+        macd_sig = cache["macd_sig"].loc[:asof_tz]
+        sma20 = cache["sma20"].loc[:asof_tz]
+        sma50 = cache["sma50"].loc[:asof_tz]
+        sma200 = cache["sma200"].loc[:asof_tz]
+        bb_pct = cache["bb_pct"].loc[:asof_tz]
+        
+        ud_ratio_s = cache["ud_ratio"].loc[:asof_tz]
+        net_acc_s = cache["net_acc"].loc[:asof_tz]
+        cmf_s = cache["cmf"].loc[:asof_tz]
+        atr_s = cache["atr"].loc[:asof_tz]
+        
+        ud_ratio = float(ud_ratio_s.iloc[-1]) if not pd.isna(ud_ratio_s.iloc[-1]) else 1.0
+        net_acc = int(net_acc_s.iloc[-1]) if not pd.isna(net_acc_s.iloc[-1]) else 0
+        cmf_v = float(cmf_s.iloc[-1]) if not pd.isna(cmf_s.iloc[-1]) else 0.0
+        
+        inst_score, inst_signals, inst_metrics = _compute_accumulation_score(df, ud_ratio=ud_ratio, net_acc=net_acc, cmf_v=cmf_v)
+        atr_val = float(atr_s.iloc[-1]) if not pd.isna(atr_s.iloc[-1]) else 0.0
+    else:
+        rsi = ta.momentum.RSIIndicator(close, window=14).rsi()
+        macd = ta.trend.MACD(close)
+        macd_line = macd.macd()
+        macd_sig = macd.macd_signal()
+        sma20 = close.rolling(20).mean()
+        sma50 = close.rolling(50).mean()
+        sma200 = close.rolling(200).mean() if len(close) >= 200 else close.rolling(len(close) // 2).mean()
+        bb = ta.volatility.BollingerBands(close, window=20)
+        bb_pct = bb.bollinger_pband()
+        
+        inst_score, inst_signals, inst_metrics = _compute_accumulation_score(df)
+        atr_val = float(atr(df)) if len(df) >= 14 else 0.0
 
     last = -1
     price = float(close.iloc[last])
@@ -196,7 +236,7 @@ def compute(df: pd.DataFrame) -> dict:
         "in_base": bool(in_base),
         "extended_at_high": bool(extended_at_high),
         "volume_ratio": float(vol.iloc[last] / avg_vol_20) if avg_vol_20 else 1.0,
-        "atr": float(atr(df)) if len(df) >= 14 else 0.0,
+        "atr": atr_val,
         "dist_200": pct_above_sma200,
         "adr_20": float(((df["High"] - df["Low"]) / df["Low"] * 100).tail(20).mean()),
         "inst_metrics": inst_metrics,
