@@ -57,24 +57,19 @@ WATCHLIST = WATCHLIST_INDIA + WATCHLIST_US
 
 # ── Composite scoring weights (sum ≈ 1.0) ────────────────────────────────────
 # Rebalanced 2026-05: backtest analysis showed momentum (12-1 factor) is the
-# single strongest driver of forward returns in this universe. Bumped momentum
-# from 0.25 → 0.40 (matches the legacy backtest redistribution that produced
-# +101% / 5y, 75.7% win rate). Trimmed sentiment/forecast/fundamental to fund
-# the increase while keeping technical at 0.20.
-#
-# 2026-05 (later): added `quality` (Novy-Marx GPA + cash quality) and
-# `earnings_drift` (PEAD anomaly). `valuation` is now a true sector-relative
-# score applied via the cross-sectional post-processor — no longer folded
-# into fundamental.
+# Rebalanced 2026-05-21: Minervini-style momentum-first weighting.
+# Backtest score calibration was FLAT (Q1≈Q5) because quality/fundamental
+# fought momentum. Fix: concentrate weight on the two proven alpha factors
+# (RS momentum + earnings drift) and demote mean-reversion signals.
 SCORE_WEIGHTS = {
-    "technical":      0.13,
-    "fundamental":    0.12,
-    "momentum":       0.27,
-    "sentiment":      0.04,
-    "forecast":       0.00,   # disabled — see analysis/composite.py (compute skipped for speed)
-    "options":        0.05,   # US only; auto-redistributed for IN tickers
-    "quality":        0.21,   # promoted — Novy-Marx GPA, FCF, accruals
-    "earnings_drift": 0.18,   # promoted — strongest non-momentum anomaly
+    "momentum":       0.40,   # RS 12-1 is king — single strongest predictor
+    "earnings_drift": 0.30,   # earnings acceleration/surprise (PEAD anomaly)
+    "technical":      0.05,   # trend-following only (remove RSI/MACD noise)
+    "fundamental":    0.05,   # minimal — revenue growth rate signal only
+    "quality":        0.10,   # avoid frauds, don't reward boringness
+    "sentiment":      0.05,   # insider buying signal
+    "options":        0.05,   # unusual activity = smart money (US only)
+    "forecast":       0.00,   # disabled
     "valuation":      0.00,   # handled cross-sectionally (post-processor)
 }
 # Sanity check at import: weights MUST sum to 1.0 or backtest composites

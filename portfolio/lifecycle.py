@@ -19,7 +19,7 @@ DEFAULT_TRAILING_PCT = 0.18          # tighter trail: 18% off peak (keeps more p
 DEFAULT_TIME_STOP_DAYS = 365
 DEFAULT_TIME_STOP_BAND = (-0.05, 0.10)  # if return between -5% and +10% at time-stop, exit
 DEFAULT_THESIS_BREAK_SCORE = 50.0
-DEFAULT_STOP_CONFIRM_BARS = 2  # close ≤ stop on N consecutive bars before firing
+DEFAULT_STOP_CONFIRM_BARS = 3  # close ≤ stop on N consecutive bars before firing (3 = filter noise)
 DEFAULT_HARD_STOP_BUFFER = 0.025  # if price < hard_stop * (1 - this), fire immediately
 DEFAULT_ADAPTIVE_TIERS = True   # re-evaluate strength at each tier and adapt sell size
 

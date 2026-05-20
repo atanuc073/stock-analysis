@@ -93,13 +93,15 @@ class BacktestConfig:
         "BEAR": 0.60,
     })
     # Tighten the per-position hard stop in weak regimes (multiplier on
-    # configured hard_stop_pct; 1.0 = no change, 0.5 = half the loss tolerance).
+    # configured hard_stop_pct; 1.0 = no change, 0.7 = 30% less room).
+    # Relaxed May'26: old 0.65/0.50 caused 49% stop-out rate (shakeouts).
+    # Prefer smaller POSITION SIZE (regime_derisk) over tighter stops.
     regime_stop_tighten: dict = field(default_factory=lambda: {
         "BULL": 1.0,
         "NEUTRAL_BULL": 1.0,
-        "NEUTRAL": 0.85,
-        "CAUTIOUS": 0.65,
-        "BEAR": 0.50,
+        "NEUTRAL": 0.90,
+        "CAUTIOUS": 0.85,
+        "BEAR": 0.70,
     })
     # Shock-day stop suppression: if VIX day-over-day jumps >= shock_vix_jump
     # AND the broad index drops <= shock_index_drop on the same day, treat
