@@ -115,6 +115,8 @@ class BacktestConfig:
     sip_amount: float = 0.0                     # 0 disables SIP (lumpsum mode)
     sip_day_of_month: int = 13
     uptrend_mode: bool = False                  # if True, use s.uptrend_score for entries
+    warmup_days: int = 30                       # skip new entries for first N days (default 60)
+
 
     @property
     def cost_per_side(self) -> float:
@@ -232,6 +234,13 @@ class BacktestEngine:
 
         rebalance_dates = set(dates[::self.cfg.rebalance_freq_days])
         rebalance_dates.add(dates[-1])  # always close on last day
+
+        # Warmup cutoff: no new entries before this date (regime detector/indicators need runway)
+        warmup_cutoff_idx = min(self.cfg.warmup_days, max(0, len(dates) - 1))
+        self._warmup_cutoff = dates[warmup_cutoff_idx] if warmup_cutoff_idx > 0 else dates[0]
+        if self.cfg.warmup_days > 0:
+            log.info("Warmup gate: no new entries until %s (first %d trading days)",
+                     self._warmup_cutoff.date(), self.cfg.warmup_days)
 
         for asof in tqdm(dates, desc="Simulating"):
             # Update regime daily (internally respects frequency checks)
@@ -525,6 +534,10 @@ class BacktestEngine:
         if n_open >= hard_cap:
             return
 
+        # Warmup gate check
+        if getattr(self, "_warmup_cutoff", None) is not None and asof < self._warmup_cutoff:
+            return
+
         # Score every symbol with sufficient history
         scores: list[BacktestScore] = []
         for sym, hd in self.data.items():
@@ -569,6 +582,22 @@ class BacktestEngine:
             breakout_today = bool(up.get("breakout_today", False))
             if pct_from_high > self.cfg.max_pct_from_52w_high:
                 continue
+
+            # Hard block 3: uptrend quality gate. Require multiple structural
+            # confirmations before committing capital (Minervini/O'Neil style).
+            # Must satisfy at least 2 of: Stage 2, trend template ≥5, U/D ≥1.0
+            uptrend_confirms = 0
+            if up.get("stage2"):
+                uptrend_confirms += 1
+            if (up.get("trend_template") or 0) >= 5:
+                uptrend_confirms += 1
+            if (up.get("ud_50") or 0) >= 1.0:
+                uptrend_confirms += 1
+            if breakout_today:
+                uptrend_confirms += 1  # breakout bypasses — always strong
+            if uptrend_confirms < 2:
+                continue
+
             scores.append(s)
         if not scores:
             return
@@ -641,14 +670,17 @@ class BacktestEngine:
             if market_weights.get(s.market, 0.0) >= self.cfg.max_market_weight:
                 continue
 
-            # Volatility-adjusted sizing × regime allocation multiplier.
-            # Use the cross-sectional adjusted score to match the live signal.
-            base_w = self.cfg.base_position_weight
+            # Cash-buffered slot sizing (Method 1): deploy available cash
+            # dynamically based on the number of empty slots.
+            deployable_cash = max(self.cash - regime_cash_required, 0.0)
+            slot_cash = deployable_cash / max(slots, 1)
+            slot_w = slot_cash / equity
+
             vol_adj = min(0.25 / max(s.annual_vol, 0.05), 1.5)
             score_adj = min(s.adjusted_score / 70.0, 1.3)
             regime_adj = self._regime_multiplier(s.market)
             target_w = min(
-                base_w * vol_adj * score_adj * regime_adj,
+                slot_w * vol_adj * score_adj * regime_adj,
                 self.cfg.max_position_weight,
             )
             target_rupees = equity * target_w
