@@ -168,9 +168,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="Transaction cost in bps (each side, one-way)")
     p.add_argument("--slippage-bps", type=float, default=0.0,
                    help="Slippage in bps (each side, one-way)")
-    p.add_argument("--warmup-days", type=int, default=252,
-                   help="Skip new entries for the first N trading days (default 252 = "
-                        "~1 year). Lets the regime detector accumulate enough history.")
+    p.add_argument("--warmup-days", type=int, default=60,
+                   help="Skip new entries for the first N trading days (default 60 = "
+                        "minimum for indicators). Data-loader fetches extra history separately.")
     args = p.parse_args(argv)
 
     output_dir = Path(args.output_dir) if args.output_dir else REPORTS_DIR / "backtest"

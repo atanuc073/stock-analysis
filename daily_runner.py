@@ -137,15 +137,19 @@ def _candidate_from(report, ticker: TickerData) -> TradeCandidate:
 def _passes_entry_quality(
     report,
     max_extension_pct: float = 25.0,
-    max_pct_from_52w_high: float = -5.0,
-    require_breakout_at_high: bool = True,
+    max_pct_from_52w_high: float = -10.0,
+    require_breakout_at_high: bool = False,
 ) -> tuple[bool, str]:
     """Mirror of the backtest engine's late-cycle / top-chase guards.
 
-    Backtest (May'26 audit) showed:
-      * stocks >25% above 200DMA: forward-30D returns turn negative
-      * stocks within 5% of 52WH (no breakout): +0.85% avg fwd-30D, 52% win
-      * deep pullbacks (-25% to -15% from 52WH): +4.41% avg fwd-30D, 71% win
+    Aligned with the validated backtest config (May'26): require >=10%%
+    pullback from 52WH, with NO breakout exception. Backtest data showed
+    that allowing breakout-at-high entries degraded edge vs. pure pullback.
+
+    Backtest evidence:
+      * stocks >25%% above 200DMA: forward-30D returns turn negative
+      * deep pullbacks (-25%% to -15%% from 52WH): best forward returns
+      * near-high entries (within -10%%): noisy, low edge
 
     Returns (passed, reason).
     """
@@ -161,14 +165,12 @@ def _passes_entry_quality(
     if ext > max_extension_pct:
         return False, f"extended {ext:.1f}% above 200DMA (cap {max_extension_pct:.0f}%)"
 
-    # 52-week-high proximity (top-chase guard)
+    # 52-week-high proximity (top-chase guard) — hard reject, no breakout exception.
     pct_from_high = up.get("pct_from_52w_high",
                            t.get("pct_from_52w_high", -100.0))
-    breakout_today = bool(up.get("breakout_today", False))
     if pct_from_high > max_pct_from_52w_high:
-        if not (require_breakout_at_high and breakout_today):
-            return False, (f"near 52WH ({pct_from_high:+.1f}%) with no "
-                           f"confirmed breakout")
+        return False, (f"near 52WH ({pct_from_high:+.1f}%) — "
+                       f"requires >={abs(max_pct_from_52w_high):.0f}% pullback")
     return True, "ok"
 
 
