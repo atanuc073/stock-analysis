@@ -120,15 +120,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-extension", type=float, default=25.0,
                    help="Max extension above 200DMA to buy (default 25.0). "
                         "Data shows fwd-30D turns negative above ~25%%.")
-    p.add_argument("--max-from-52wh", type=float, default=-10.0,
+    p.add_argument("--max-from-52wh", type=float, default=0.0,
                    help="Require at least this %% pullback from 52w high "
-                        "(default -10.0; e.g. -3 forces >=3%% pullback). "
-                        "Hard reject — no breakout exception (May'26 validated config).")
+                        "(default 0.0 = disabled; e.g. -10 forces >=10%% pullback).")
     p.add_argument("--allow-buy-at-high", action="store_true",
                    help="Allow buys at 52WH without requiring a fresh breakout signal.")
     p.add_argument("--min-rs-pct", type=float, default=0.0,
                    help="Require RS percentile rank >= this (0-100, default 0 = no hard filter; "
                         "try 70 for leaders-only). RS score bump is always applied either way.")
+    p.add_argument("--base-position-weight", type=float, default=0.15,
+                   help="Base weight allocated to each position (default 0.10 = 10%)")
+    p.add_argument("--ignore-cash-floor", action="store_true",
+                   help="Bypass all regime-based cash floors to stay fully invested at all times.")
     p.add_argument("--max-sector-weight", type=float, default=0.30,
                    help="Max sector concentration weight (default 0.30)")
     p.add_argument("--max-market-weight", type=float, default=0.70,
@@ -214,6 +217,8 @@ def main(argv: list[str] | None = None) -> int:
         transaction_cost_bps=args.transaction_cost_bps,
         slippage_bps=args.slippage_bps,
         warmup_days=args.warmup_days,
+        base_position_weight=args.base_position_weight,
+        ignore_cash_floor=args.ignore_cash_floor,
     )
 
     # Pre-load benchmarks (also used as regime input)

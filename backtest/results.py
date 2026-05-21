@@ -159,15 +159,24 @@ def compute(result: BacktestResult, risk_free_rate: float = 0.06) -> Performance
 
 def yearly_breakdown(result: BacktestResult) -> pd.DataFrame:
     """Calendar year P&L."""
-    eq = pd.DataFrame([(p.date, p.total) for p in result.equity_curve],
-                      columns=["date", "equity"]).set_index("date").sort_index()
+    eq = pd.DataFrame([(p.date, p.total, p.contribution) for p in result.equity_curve],
+                      columns=["date", "equity", "contribution"])
+    eq = eq.set_index("date").sort_index()
     yearly_end = eq["equity"].resample("YE").last()
     yearly_start = eq["equity"].resample("YE").first()
+    yearly_contribs = eq["contribution"].resample("YE").sum()
+    
     rows = []
+    first_year = True
     for ye_date, end_val in yearly_end.items():
         year = ye_date.year
         start_val = yearly_start.loc[ye_date]
-        ret_pct = (end_val / start_val - 1) * 100 if start_val else 0.0
+        contrib_val = float(yearly_contribs.loc[ye_date])
+        
+        net_profit = end_val - start_val - contrib_val
+        denom = start_val + contrib_val
+        ret_pct = (net_profit / denom * 100) if denom > 0 else 0.0
+        
         # trades that year
         year_trades = [t for t in result.trades
                        if t.timestamp.startswith(str(year)) and t.action == "SELL"]
@@ -176,6 +185,8 @@ def yearly_breakdown(result: BacktestResult) -> pd.DataFrame:
             "Year": year,
             "Start_Equity": round(start_val, 0),
             "End_Equity": round(end_val, 0),
+            "Contributions": round(contrib_val, 0),
+            "Net_Profit": round(net_profit, 0),
             "Return_%": round(ret_pct, 2),
             "Trades_Closed": len(year_trades),
             "Wins": wins,

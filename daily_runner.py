@@ -22,7 +22,7 @@ from tqdm import tqdm
 import yfinance as yf
 
 from config import REPORTS_DIR, RUN_MODE, TOP_N, WATCHLIST
-from data_sources.universe import broad_universe, russell1000_tickers, sp500_tickers, nifty500_tickers
+from data_sources.universe import broad_universe, russell1000_tickers, sp500_tickers, nifty500_tickers, nse_all_tickers
 from data_sources.yahoo import fetch_many, TickerData
 from analysis.composite import analyze
 from analysis.indicators import atr, annualized_volatility
@@ -165,12 +165,7 @@ def _passes_entry_quality(
     if ext > max_extension_pct:
         return False, f"extended {ext:.1f}% above 200DMA (cap {max_extension_pct:.0f}%)"
 
-    # 52-week-high proximity (top-chase guard) — hard reject, no breakout exception.
-    pct_from_high = up.get("pct_from_52w_high",
-                           t.get("pct_from_52w_high", -100.0))
-    if pct_from_high > max_pct_from_52w_high:
-        return False, (f"near 52WH ({pct_from_high:+.1f}%) — "
-                       f"requires >={abs(max_pct_from_52w_high):.0f}% pullback")
+    # 52-week-high proximity (top-chase guard) — removed per user request to allow breakouts near high.
     return True, "ok"
 
 
@@ -214,6 +209,8 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshol
         universe = sp500_tickers()
     elif mode == "nifty500":
         universe = nifty500_tickers()
+    elif mode in ("nse_all", "niftytotal"):
+        universe = nse_all_tickers()
     else:
         universe = WATCHLIST
     log.info("Universe: %d", len(universe))
@@ -767,7 +764,7 @@ def _render_telegram(regime, snap, exit_signals, flag_details, tax_advice, candi
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--mode",
-                   choices=["watchlist", "broad", "russell1000", "sp500", "nifty500"],
+                   choices=["watchlist", "broad", "russell1000", "sp500", "nifty500", "nse_all", "niftytotal"],
                    default=RUN_MODE)
     p.add_argument("--top", type=int, default=TOP_N)
     p.add_argument("--threshold", type=float, default=70.0, help="Min composite score (default 70)")

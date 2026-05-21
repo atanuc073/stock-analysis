@@ -52,7 +52,7 @@ class BacktestConfig:
     # while deep pullbacks (-25% to -15%) returned +4.4% avg fwd-30D with
     # 100% win-rate. Tightened from -1.5 → -5.0 to skip the noisy middle
     # band; confirmed breakouts still get through via require_breakout_at_high.
-    max_pct_from_52w_high: float = -5.0        # require ≥5% pullback from 52WH unless breakout_today (default -5.0)
+    max_pct_from_52w_high: float = 0.0         # require pullback from 52WH (default 0.0 = disabled)
     require_breakout_at_high: bool = True      # if at the high, demand breakout_today=True from uptrend.compute
     # Relative-strength entry filter (IBD-style RS percentile rank, 12-1
     # momentum cross-sectional). 0 = disabled (legacy behaviour). 70 = only
@@ -60,8 +60,8 @@ class BacktestConfig:
     # Even when disabled as a hard filter, the RS pass still applies a
     # +10/+7/+4/-5 score bump (see scoring.apply_rs_to_bt), so RS influences
     # ranking either way.
-    min_rs_pct: float = 0.0
-    max_market_weight: float = 0.70            # max country concentration weight (default 70%)
+    min_rs_pct: float = 70
+    max_market_weight: float = 0.99           # max country concentration weight (default 70%)
     transaction_cost_bps: float = 0.0          # 0 bps each side (0.00%)
     slippage_bps: float = 0.0                  # 0 bps slippage
     include_forecast: bool = False             # forecast slow; off by default
@@ -74,6 +74,7 @@ class BacktestConfig:
     # toward `regime_derisk_target_mult` of its current size on rebalance days.
     regime_derisk_below: Optional[str] = "CAUTIOUS"   # None to disable
     regime_derisk_target_mult: float = 0.5            # keep 50% of size in CAUTIOUS/BEAR
+    ignore_cash_floor: bool = False                   # completely bypass cash floors to stay fully invested
     # ── Bear-market capital preservation knobs ─────────────────────────────
     # Raise min_score bar in weak regimes (only A+ setups get through):
     regime_min_score_bumps: dict = field(default_factory=lambda: {
@@ -439,6 +440,8 @@ class BacktestEngine:
         Uses the AVERAGE cash-floor across markets rather than worst-case so
         a single bear market doesn't force the whole book to cash.
         """
+        if self.cfg.ignore_cash_floor:
+            return 0.0
         if not self.cfg.use_regime or not self._current_regime:
             return self.cfg.regime_cash_floor.get("BULL", 0.0)
         floors = [
@@ -674,8 +677,12 @@ class BacktestEngine:
 
             # Cash-buffered slot sizing (Method 1): deploy available cash
             # dynamically based on the number of empty slots.
+            # Avoid splitting cash into tiny fragments when cash is scarce (like in SIP mode)
+            # or when equity is large. Instead, slot_cash is sized to target the base weight,
+            # capped by available deployable cash.
             deployable_cash = max(self.cash - regime_cash_required, 0.0)
-            slot_cash = deployable_cash / max(slots, 1)
+            target_base_cash = equity * self.cfg.base_position_weight
+            slot_cash = max(deployable_cash / max(slots, 1), min(deployable_cash, target_base_cash))
             slot_w = slot_cash / equity
 
             vol_adj = min(0.25 / max(s.annual_vol, 0.05), 1.5)
@@ -687,13 +694,19 @@ class BacktestEngine:
             )
             target_rupees = equity * target_w
 
-            if target_rupees < equity * 0.02:    # too small to bother
+            # Determine a dynamic minimum trade size floor to avoid the cash drag deadlock.
+            # In SIP mode or when cash is scarce, we allow smaller absolute sizes (down to Rs. 10k).
+            min_size_floor = min(equity * 0.02, 10000.0)
+            if self.cfg.sip_amount > 0:
+                min_size_floor = min(min_size_floor, self.cfg.sip_amount * 0.5)
+
+            if target_rupees < min_size_floor:    # too small to bother
                 continue
             # Cap by available cash above regime floor
             deployable_cash = max(self.cash - regime_cash_required, 0.0)
             if target_rupees > deployable_cash * 0.95:
                 target_rupees = deployable_cash * 0.95
-            if target_rupees < equity * 0.02:
+            if target_rupees < min_size_floor:
                 continue
 
             qty = target_rupees / s.price
