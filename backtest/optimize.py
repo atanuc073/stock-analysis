@@ -282,6 +282,54 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as e:
             log.critical("🚨 Unexpected error saving to %s: %s", path, e)
 
+    def _save_excel(path: Path, df: pd.DataFrame, fold_top10s: dict[int, pd.DataFrame], avg_weights: dict[str, float], objective: str):
+        try:
+            with pd.ExcelWriter(path, engine="openpyxl") as w:
+                df.to_excel(w, sheet_name="Walk_Forward_Summary", index=False)
+                
+                weight_rows = [{"Factor": k, "Weight": v} for k, v in avg_weights.items()]
+                pd.DataFrame(weight_rows).to_excel(w, sheet_name="Suggested_Weights", index=False)
+                
+                for f_num, f_df in fold_top10s.items():
+                    f_df.to_excel(w, sheet_name=f"Fold{f_num}_Top10_Candidates", index=False)
+            
+            from openpyxl import load_workbook
+            from openpyxl.styles import PatternFill, Font, Alignment
+            
+            wb = load_workbook(path)
+            header_fill = PatternFill("solid", fgColor="1F4E78")
+            header_font = Font(bold=True, color="FFFFFF")
+            
+            for ws in wb.worksheets:
+                for cell in ws[1]:
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = Alignment(horizontal="center")
+                ws.row_dimensions[1].height = 22
+                ws.freeze_panes = "B2"
+                for col in ws.columns:
+                    try:
+                        max_len = max(len(str(c.value)) if c.value is not None else 0 for c in col)
+                    except ValueError:
+                        max_len = 12
+                    ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 32)
+                if ws.max_row > 1:
+                    ws.auto_filter.ref = ws.dimensions
+            wb.save(path)
+            log.info("✨ Successfully saved beautiful Excel optimization report to %s", path)
+        except PermissionError:
+            import time
+            timestamp = int(time.time())
+            backup_path = path.parent / f"{path.stem}_backup_{timestamp}.xlsx"
+            log.error("❌ Permission Denied when saving Excel report to %s! The file might be open in Excel.", path)
+            log.warning("⚠️ Saving Excel report to backup instead: %s", backup_path)
+            try:
+                _save_excel(backup_path, df, fold_top10s, avg_weights, objective)
+            except Exception as e:
+                log.critical("🚨 Failed to save Excel backup file: %s", e)
+        except Exception as e:
+            log.error("⚠️ Could not write Excel optimization report: %s", e)
+
     p = argparse.ArgumentParser(description="Walk-forward weight optimizer.")
     p.add_argument("--start", required=True)
     p.add_argument("--end", required=True)
@@ -381,6 +429,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── For each window, score every candidate on train; record OOS ──
     fold_records: list[dict] = []
+    fold_top10s: dict[int, pd.DataFrame] = {}
     for fold_idx, (ts, te, vs, ve) in enumerate(windows):
         train_dates = _slice_dates(all_dates, ts, te)
         test_dates = _slice_dates(all_dates, vs, ve)
@@ -509,7 +558,9 @@ def main(argv: list[str] | None = None) -> int:
             row.update({f"w_{k}": round(candidates[ci][k], 3)
                         for k in ACTIVE_FACTORS})
             top10.append(row)
-        _safe_to_csv(pd.DataFrame(top10), output_dir / f"fold{fold_idx + 1}_top10_train.csv")
+        top10_df = pd.DataFrame(top10)
+        _safe_to_csv(top10_df, output_dir / f"fold{fold_idx + 1}_top10_train.csv")
+        fold_top10s[fold_idx + 1] = top10_df
 
     # ── Save & summarize ─────────────────────────────────────────────
     df = pd.DataFrame(fold_records)
@@ -523,6 +574,7 @@ def main(argv: list[str] | None = None) -> int:
     print()
 
     # Average best-weights across folds (the most defensible "deploy" choice)
+    avg_weights = {}
     if len(df) > 0:
         avg_weights = {f: float(df[f"w_{f}"].mean()) for f in ACTIVE_FACTORS}
         total = sum(avg_weights.values())
@@ -535,6 +587,10 @@ def main(argv: list[str] | None = None) -> int:
         for k, v in avg_weights.items():
             print(f"    \"{k}\":\t{v:.3f},")
         print()
+        
+    # Save the beautiful Excel workbook report!
+    _save_excel(output_dir / "optimization_results.xlsx", df, fold_top10s, avg_weights, args.objective)
+    
     print(f"Detailed results: {out_csv}")
     return 0
 
