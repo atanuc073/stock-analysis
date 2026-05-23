@@ -160,8 +160,7 @@ def compute(df: pd.DataFrame) -> dict:
     pct_from_30d_high = (price / high_30 - 1) * 100
     pulled_back_in_range = pct_from_30d_high <= -3 and far_from_low  # 3%+ off 30d high
 
-    # Institutional Buy Probability Pass
-    inst_score, inst_signals, inst_metrics = _compute_accumulation_score(df)
+
 
     # Scoring
     score = 50.0

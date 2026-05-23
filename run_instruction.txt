@@ -50,3 +50,36 @@ python -m backtest.cli --start 2020-01-01 --end 2024-12-31 --capital 1000000
 
 Backtest with uptrend
 python -m backtest.cli --start 2023-01-01 --end 2024-12-31 --universe us --threshold 70 --uptrend
+
+
+
+.\.venv\Scripts\python.exe -m backtest.optimize `
+  --start 2019-01-01 --end 2025-12-31 `
+  --universe nifty500 `
+  --strategy grid `
+  --grid-steps "0,0.25,0.33,0.5" `
+  --grid-min-active 2 `
+  --objective sharpe_mono `
+  --max-workers 6 `
+  --output-dir reports/optimize/grid_mono
+
+# Super-fast optimization (20 candidates, random search) — finishes in ~5 minutes!
+.\.venv\Scripts\python.exe -m backtest.optimize `
+  --start 2019-01-01 --end 2025-12-31 `
+  --universe nifty500 `
+  --strategy random `
+  --candidates 20 `
+  --objective sharpe_mono `
+  --max-workers 6 `
+  --output-dir reports/optimize/random_20
+
+# Super-fast subset optimization (20 candidates, random search over 200 random stocks from Nifty 500)
+.\.venv\Scripts\python.exe -m backtest.optimize `
+  --start 2019-01-01 --end 2025-12-31 `
+  --universe nifty500 `
+  --strategy random `
+  --candidates 20 `
+  --sample-size 200 `
+  --objective sharpe_mono `
+  --max-workers 6 `
+  --output-dir reports/optimize/random_20_sample_200

@@ -6,12 +6,24 @@ Sortino, Calmar, or CAGR) on out-of-sample data. Two modes:
     1. Single split (default): train on first window, test on second.
     2. Walk-forward (--walk-forward): rolling 3y train / 1y test windows.
 
-Two search strategies:
+Three search strategies:
     - 'random'   — Dirichlet-sampled weight vectors (default; fast, broad).
     - 'sleeves'  — single-factor sleeves (each factor at 1.0, others 0).
                    Used to measure the marginal contribution of each factor;
                    shows you which factors are pulling weight and which are
                    noise.
+    - 'grid'     — exhaustive grid over coarse weight steps (e.g. {0, 0.25,
+                   0.5, 0.75, 1.0}) across ACTIVE_FACTORS, renormalized to
+                   sum=1. Use this when you want sklearn-style GridSearchCV
+                   behavior.
+
+Objectives include score-calibration metrics that directly target the
+monotonicity problem (Q1..Q5 must increase with score):
+    - 'monotonicity' — Spearman rank correlation between score-bucket rank
+                       and avg PnL. +1.0 = perfectly monotonic.
+    - 'q5_q1'        — Q5 avg PnL minus Q1 avg PnL (top-vs-bottom spread).
+    - 'sharpe_mono'  — combined: sharpe + 2*monotonicity (balances risk-
+                       adjusted return with rank quality).
 
 Examples:
     # Random search, 100 candidates, single split
@@ -40,7 +52,7 @@ from config import REPORTS_DIR, WATCHLIST, WATCHLIST_INDIA, WATCHLIST_US
 
 from .data_loader import load_universe, trading_dates
 from .engine import BacktestConfig, BacktestEngine
-from .results import compute as compute_stats
+from .results import compute as compute_stats, score_calibration
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,6 +72,20 @@ def _resolve_universe(name: str) -> list[str]:
     if n == "watchlist": return WATCHLIST
     if n == "india":     return WATCHLIST_INDIA
     if n == "us":        return WATCHLIST_US
+    if n == "nifty500":
+        try:
+            from data_sources.universe import nifty500_tickers
+            return nifty500_tickers()
+        except Exception as e:
+            log.warning("nifty500 unavailable (%s); fallback to watchlist", e)
+            return WATCHLIST
+    if n == "nse_all":
+        try:
+            from data_sources.universe import nse_all_tickers
+            return nse_all_tickers()
+        except Exception as e:
+            log.warning("nse_all unavailable (%s); fallback to watchlist", e)
+            return WATCHLIST
     return [s.strip() for s in name.split(",") if s.strip()]
 
 
@@ -98,6 +124,64 @@ def _sleeve_weights(factors: list[str]) -> list[dict]:
     return out
 
 
+def _grid_weights(factors: list[str], steps: list[float],
+                  min_active: int = 2) -> list[dict]:
+    """Exhaustive grid over ``steps`` per factor; renormalize sum→1.
+
+    Drops candidates with all-zero weights or fewer than ``min_active`` non-
+    zero factors (to avoid degenerate single-factor + noise combinations
+    that the 'sleeves' strategy already covers).
+
+    Combinatorial size = len(steps) ** len(factors). With 5 factors and
+    5 steps that's 3,125 candidates → use 3 or 4 steps for practical runs.
+    """
+    import itertools
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    for combo in itertools.product(steps, repeat=len(factors)):
+        if sum(combo) <= 0:
+            continue
+        if sum(1 for v in combo if v > 0) < min_active:
+            continue
+        total = sum(combo)
+        norm = tuple(round(v / total, 4) for v in combo)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        w = {f: float(norm[i]) for i, f in enumerate(factors)}
+        for k in ("sentiment", "options", "forecast", "valuation"):
+            w.setdefault(k, 0.0)
+        out.append(w)
+    return out
+
+
+def _calibration_metrics(result) -> tuple[float, float]:
+    """Compute (monotonicity, q5_q1_spread) from a backtest result.
+
+    monotonicity = Spearman rank corr between bucket rank (Q1=1..Q5=5) and
+                   AvgPnL_Pct. +1.0 = perfectly monotonic, -1.0 = perfectly
+                   inverted (the current Q5<Q1 problem).
+    q5_q1_spread = AvgPnL_Pct[Q5] - AvgPnL_Pct[Q1] (percentage points).
+    """
+    try:
+        calib = score_calibration(result, n_quantiles=5)
+        if calib.empty or len(calib) < 2:
+            return 0.0, 0.0
+        # Bucket labels look like "Q1 [70.15-76.17]" → extract Q index
+        calib = calib.copy()
+        calib["q_idx"] = calib["Score_Bucket"].str.extract(r"Q(\d+)").astype(int)
+        calib = calib.sort_values("q_idx")
+        # Spearman corr between rank order and avg PnL
+        mono = float(calib["q_idx"].corr(calib["AvgPnL_Pct"], method="spearman"))
+        if not np.isfinite(mono):
+            mono = 0.0
+        spread = float(calib["AvgPnL_Pct"].iloc[-1] - calib["AvgPnL_Pct"].iloc[0])
+        return mono, spread
+    except Exception as e:
+        log.debug("calibration metrics failed: %s", e)
+        return 0.0, 0.0
+
+
 def _run_backtest(data, dates, weights: dict, capital: float,
                   threshold: float, max_pos: int) -> dict:
     """Run one backtest with given weights; return key stats dict."""
@@ -113,24 +197,28 @@ def _run_backtest(data, dates, weights: dict, capital: float,
     )
     engine = BacktestEngine(data, cfg)
     result = engine.run(dates)
+    fail = {"sharpe": -99.0, "cagr": -99.0, "calmar": -99.0,
+            "sortino": -99.0, "trades": 0, "max_dd": 0.0, "final": capital,
+            "win_rate": 0.0, "monotonicity": -1.0, "q5_q1": -99.0}
     if not result.equity_curve:
-        return {"sharpe": -99.0, "cagr": -99.0, "calmar": -99.0,
-                "sortino": -99.0, "trades": 0, "max_dd": 0.0, "final": capital}
+        return fail
     try:
         stats = compute_stats(result)
     except Exception as e:
         log.warning("stats failed: %s", e)
-        return {"sharpe": -99.0, "cagr": -99.0, "calmar": -99.0,
-                "sortino": -99.0, "trades": 0, "max_dd": 0.0, "final": capital}
+        return fail
+    mono, spread = _calibration_metrics(result)
     return {
-        "sharpe":   float(stats.sharpe_ratio),
-        "sortino":  float(stats.sortino_ratio),
-        "calmar":   float(stats.calmar_ratio),
-        "cagr":     float(stats.cagr_pct),
-        "max_dd":   float(stats.max_drawdown_pct),
-        "trades":   int(stats.total_trades),
-        "win_rate": float(stats.win_rate_pct),
-        "final":    float(stats.final_equity),
+        "sharpe":       float(stats.sharpe_ratio),
+        "sortino":      float(stats.sortino_ratio),
+        "calmar":       float(stats.calmar_ratio),
+        "cagr":         float(stats.cagr_pct),
+        "max_dd":       float(stats.max_drawdown_pct),
+        "trades":       int(stats.total_trades),
+        "win_rate":     float(stats.win_rate_pct),
+        "final":        float(stats.final_equity),
+        "monotonicity": float(mono),
+        "q5_q1":        float(spread),
     }
 
 
@@ -138,10 +226,17 @@ def _objective_value(stats: dict, objective: str) -> float:
     """Map a stats dict to a single scalar for ranking."""
     if stats["trades"] < 5:
         return -99.0  # exclude pathological zero-trade runs
-    if objective == "sharpe":  return stats["sharpe"]
-    if objective == "sortino": return stats["sortino"]
-    if objective == "calmar":  return stats["calmar"]
-    if objective == "cagr":    return stats["cagr"]
+    if objective == "sharpe":       return stats["sharpe"]
+    if objective == "sortino":      return stats["sortino"]
+    if objective == "calmar":       return stats["calmar"]
+    if objective == "cagr":         return stats["cagr"]
+    if objective == "monotonicity": return stats["monotonicity"]
+    if objective == "q5_q1":        return stats["q5_q1"]
+    # Combined: rewards both risk-adjusted return AND a monotonic score curve.
+    # Sharpe is ~[-1, 3], monotonicity is [-1, 1], so 2x weight keeps scales
+    # comparable. Tune the 2.0 if you want to favor one side more.
+    if objective == "sharpe_mono":
+        return stats["sharpe"] + 2.0 * stats["monotonicity"]
     raise ValueError(f"unknown objective: {objective}")
 
 
@@ -177,9 +272,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--threshold", type=float, default=70.0)
     p.add_argument("--max-positions", type=int, default=12)
     p.add_argument("--candidates", type=int, default=80,
-                   help="random search candidates (ignored for sleeves)")
-    p.add_argument("--strategy", choices=["random", "sleeves"], default="random")
-    p.add_argument("--objective", choices=["sharpe", "sortino", "calmar", "cagr"],
+                   help="random search candidates (ignored for sleeves/grid)")
+    p.add_argument("--strategy", choices=["random", "sleeves", "grid"],
+                   default="random")
+    p.add_argument("--grid-steps", default="0,0.25,0.5,0.75,1.0",
+                   help="comma-separated weight steps for --strategy grid")
+    p.add_argument("--grid-min-active", type=int, default=2,
+                   help="min number of non-zero factors per grid candidate")
+    p.add_argument("--objective",
+                   choices=["sharpe", "sortino", "calmar", "cagr",
+                            "monotonicity", "q5_q1", "sharpe_mono"],
                    default="sharpe")
     p.add_argument("--walk-forward", action="store_true",
                    help="rolling 3y train / 1y test windows")
@@ -187,6 +289,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--test-years", type=int, default=1)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--max-workers", type=int, default=4)
+    p.add_argument("--sample-size", type=int, default=None,
+                   help="randomly sample N symbols from the resolved universe")
     p.add_argument("--output-dir", default=None)
     args = p.parse_args(argv)
 
@@ -198,12 +302,24 @@ def main(argv: list[str] | None = None) -> int:
         candidates = _sleeve_weights(ACTIVE_FACTORS)
         log.info("Strategy=sleeves: testing %d single-factor configurations",
                  len(candidates))
+    elif args.strategy == "grid":
+        steps = [float(s) for s in args.grid_steps.split(",") if s.strip()]
+        candidates = _grid_weights(ACTIVE_FACTORS, steps,
+                                   min_active=args.grid_min_active)
+        log.info("Strategy=grid: %d candidates from steps=%s (min_active=%d)",
+                 len(candidates), steps, args.grid_min_active)
     else:
         candidates = _dirichlet_weights(args.candidates, ACTIVE_FACTORS, seed=args.seed)
         log.info("Strategy=random: %d Dirichlet-sampled candidates", len(candidates))
 
     # ── Load data once for the full span ─────────────────────────────
     symbols = _resolve_universe(args.universe)
+    if args.sample_size and len(symbols) > args.sample_size:
+        import random
+        random.seed(args.seed)
+        symbols = random.sample(symbols, args.sample_size)
+        log.info("Randomly sampled %d symbols out of %s (seed=%d)", len(symbols), args.universe, args.seed)
+
     data = load_universe(symbols, args.start, args.end, max_workers=args.max_workers)
     if not data:
         log.error("No data loaded; aborting")
@@ -244,14 +360,26 @@ def main(argv: list[str] | None = None) -> int:
 
         # 1) score every candidate on the TRAIN window
         train_results = []
+        best_so_far_score = -999.0
         for ci, w in enumerate(candidates):
             stats = _run_backtest(data, train_dates, w,
                                   args.capital, args.threshold, args.max_positions)
             score = _objective_value(stats, args.objective)
             train_results.append((ci, score, stats))
-            if (ci + 1) % max(1, len(candidates) // 10) == 0:
-                log.info("  train: %d/%d candidates scored",
-                         ci + 1, len(candidates))
+            
+            # Format active weights nicely
+            w_str = ", ".join(f"{f[:4].capitalize()}:{w[f]:.2f}" for f in ACTIVE_FACTORS)
+            
+            # Check if this candidate is the new best
+            is_new_best = score > best_so_far_score
+            if is_new_best:
+                best_so_far_score = score
+                best_indicator = " ✨ [NEW BEST]"
+            else:
+                best_indicator = ""
+                
+            log.info("  Candidate %d/%d [%s] -> Score: %.3f (Sharpe: %.2f, Mono: %.2f, CAGR: %.1f%%, DD: %.1f%%)%s",
+                     ci + 1, len(candidates), w_str, score, stats["sharpe"], stats["monotonicity"], stats["cagr"], stats["max_dd"], best_indicator)
 
         # 2) pick best on TRAIN, evaluate on TEST
         train_results.sort(key=lambda x: x[1], reverse=True)
@@ -271,6 +399,8 @@ def main(argv: list[str] | None = None) -> int:
             "test_sharpe": round(test_stats["sharpe"], 3),
             "test_max_dd": round(test_stats["max_dd"], 2),
             "test_trades": test_stats["trades"],
+            "test_mono": round(test_stats["monotonicity"], 3),
+            "test_q5_q1": round(test_stats["q5_q1"], 2),
             **{f"w_{k}": round(v, 3) for k, v in best_w.items()
                if k in ACTIVE_FACTORS},
         })
@@ -280,7 +410,10 @@ def main(argv: list[str] | None = None) -> int:
         for ci, s, st in train_results[:10]:
             row = {"candidate": ci, "train_score": round(s, 3),
                    "trades": st["trades"], "cagr": round(st["cagr"], 2),
-                   "max_dd": round(st["max_dd"], 2)}
+                   "sharpe": round(st["sharpe"], 3),
+                   "max_dd": round(st["max_dd"], 2),
+                   "mono": round(st["monotonicity"], 3),
+                   "q5_q1": round(st["q5_q1"], 2)}
             row.update({f"w_{k}": round(candidates[ci][k], 3)
                         for k in ACTIVE_FACTORS})
             top10.append(row)
