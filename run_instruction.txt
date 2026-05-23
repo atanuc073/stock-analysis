@@ -83,3 +83,59 @@ python -m backtest.cli --start 2023-01-01 --end 2024-12-31 --universe us --thres
   --objective sharpe_mono `
   --max-workers 6 `
   --output-dir reports/optimize/random_20_sample_200
+
+
+
+  00:47:25 [INFO] backtest.engine: Backtest: 2014-01-01 → 2022-05-30, 2072 days, 498 symbols, capital ₹1,000,000
+00:47:25 [INFO] backtest.engine: Warmup gate: no new entries until 2014-02-12 (first 30 trading days)
+Simulating: 100%|████████████████████████████████████████████████████████████████████| 2072/2072 [10:11<00:00,  3.39it/s] 
+00:57:36 [INFO] backtest.optimize:   Train Candidate 12/20 [Tech:0.32, Fund:0.16, Mome:0.23, Qual:0.21, Earn:0.07] -> Score: 2.287 (Sharpe: 0.89, Mono: 0.70, CAGR: 19.9%, DD: -26.8%)
+00:57:36 [INFO] backtest.engine: Backtest: 2014-01-01 → 2022-05-30, 2072 days, 498 symbols, capital ₹1,000,000
+00:57:36 [INFO] backtest.engine: Warmup gate: no new entries until 2014-02-12 (first 30 trading days)
+Simulating: 100%|████████████████████████████████████████████████████████████████████| 2072/2072 [10:18<00:00,  3.35it/s] 
+01:07:54 [INFO] backtest.optimize:   Train Candidate 13/20 [Tech:0.10, Fund:0.12, Mome:0.13, Qual:0.47, Earn:0.19] -> Score: 0.366 (Sharpe: 0.97, Mono: -0.30, CAGR: 20.2%, DD: -22.2%)
+01:07:54 [INFO] backtest.engine: Backtest: 2014-01-01 → 2022-05-30, 2072 days, 498 symbols, capital ₹1,000,000
+01:07:54 [INFO] backtest.engine: Warmup gate: no new entries until 2014-02-12 (first 30 trading days)
+Simulating: 100%|████████████████████████████████████████████████████████████████████| 2072/2072 [11:04<00:00,  3.12it/s] 
+01:18:59 [INFO] backtest.optimize:   Train Candidate 14/20 [Tech:0.38, Fund:0.24, Mome:0.14, Qual:0.01, Earn:0.22] -> Score: 2.259 (Sharpe: 0.86, Mono: 0.70, CAGR: 19.3%, DD: -25.2%)
+01:18:59 [INFO] backtest.engine: Backtest: 2014-01-01 → 2022-05-30, 2072 days, 498 symbols, capital ₹1,000,000
+01:18:59 [INFO] backtest.engine: Warmup gate: no new entries until 2014-02-12 (first 30 trading days)
+Simulating: 100%|████████████████████████████████████████████████████████████████████| 2072/2072 [08:45<00:00,  3.94it/s] 
+01:27:44 [INFO] backtest.optimize:   Train Candidate 15/20 [Tech:0.14, Fund:0.33, Mome:0.45, Qual:0.07, Earn:0.01] -> Score: 0.398 (Sharpe: 1.00, Mono: -0.30, CAGR: 22.9%, DD: -29.1%)
+01:27:44 [INFO] backtest.engine: Backtest: 2014-01-01 → 2022-05-30, 2072 days, 498 symbols, capital ₹1,000,000
+01:27:44 [INFO] backtest.engine: Warmup gate: no new entries until 2014-02-12 (first 30 trading days)
+Simulating: 100%|████████████████████████████████████████████████████████████████████| 2072/2072 [09:56<00:00,  3.48it/s] 
+01:37:41 [INFO] backtest.optimize:   Train Candidate 16/20 [Tech:0.13, Fund:0.36, Mome:0.11, Qual:0.30, Earn:0.10] -> Score: 1.300 (Sharpe: 0.90, Mono: 0.20, CAGR: 19.4%, DD: -25.6%)
+01:37:41 [INFO] backtest.engine: Backtest: 2014-01-01 → 2022-05-30, 2072 days, 498 symbols, capital ₹1,000,000
+01:37:41 [INFO] backtest.engine: Warmup gate: no new entries until 2014-02-12 (first 30 trading days)
+01:50:15 [INFO] backtest.optimize:   Train Candidate 17/20 [Tech:0.66, Fund:0.14, Mome:0.07, Qual:0.07, Earn:0.06] -> Score: 2.030 (Sharpe: 1.03, Mono: 0.50, CAGR: 22.8%, DD: -26.0%)
+01:50:15 [INFO] backtest.engine: Backtest: 2014-01-01 → 2022-05-30, 2072 days, 498 symbols, capital ₹1,000,000
+01:50:15 [INFO] backtest.engine: Warmup gate: no new entries until 2014-02-12 (first 30 trading days)
+Simulating: 100%|████████████████████████████████████████████████████████████████████| 2072/2072 [10:14<00:00,  3.37it/s] 
+02:00:30 [INFO] backtest.optimize:   Train Candidate 18/20 [Tech:0.02, Fund:0.48, Mome:0.13, Qual:0.11, Earn:0.26] -> Score: 0.059 (Sharpe: 0.86, Mono: -0.40, CAGR: 18.5%, DD: -26.5%)
+02:00:30 [INFO] backtest.engine: Backtest: 2014-01-01 → 2022-05-30, 2072 days, 498 symbols, capital ₹1,000,000
+02:00:30 [INFO] backtest.engine: Warmup gate: no new entries until 2014-02-12 (first 30 trading days)
+Simulating: 100%|████████████████████████████████████████████████████████████████████| 2072/2072 [08:54<00:00,  3.88it/s] 
+02:09:24 [INFO] backtest.optimize:   Train Candidate 19/20 [Tech:0.05, Fund:0.49, Mome:0.33, Qual:0.08, Earn:0.05] -> Score: 0.690 (Sharpe: 1.09, Mono: -0.20, CAGR: 24.5%, DD: -24.9%)
+02:09:24 [INFO] backtest.engine: Backtest: 2014-01-01 → 2022-05-30, 2072 days, 498 symbols, capital ₹1,000,000
+02:09:24 [INFO] backtest.engine: Warmup gate: no new entries until 2014-02-12 (first 30 trading days)
+Simulating: 100%|████████████████████████████████████████████████████████████████████| 2072/2072 [13:26<00:00,  2.57it/s] 
+02:22:51 [INFO] backtest.optimize:   Train Candidate 20/20 [Tech:0.14, Fund:0.08, Mome:0.02, Qual:0.14, Earn:0.61] -> Score: 2.744 (Sharpe: 0.74, Mono: 1.00, CAGR: 15.3%, DD: -20.7%) ✨ [NEW BEST]
+02:22:51 [INFO] backtest.engine: Backtest: 2022-05-31 → 2025-12-30, 887 days, 498 symbols, capital ₹1,000,000
+02:22:51 [INFO] backtest.engine: Warmup gate: no new entries until 2022-07-12 (first 30 trading days)
+Simulating: 100%|██████████████████████████████████████████████████████████████████████| 887/887 [07:34<00:00,  1.95it/s] 
+02:30:25 [INFO] backtest.optimize: Successfully saved results to reports\optimize\random_20_sample_200\fold1_top10_train.csv
+02:30:25 [INFO] backtest.optimize: Successfully saved results to reports\optimize\random_20_sample_200\walk_forward_results.csv
+
+================================================================================
+WALK-FORWARD RESULTS (objective: sharpe_mono)
+================================================================================
+ fold                  train                   test  best_candidate rank_by  train_score  test_score   gap  test_cagr  test_sharpe  test_max_dd  test_trades  test_mono  test_q5_q1  w_technical  w_fundamental  w_momentum  w_quality  w_earnings_drift
+    1 2014-01-01..2022-05-30 2022-05-31..2025-12-30              19   train        2.744       2.806 0.062      17.66        0.806       -21.52          586        1.0        8.03        0.145          0.083       0.021      0.137             0.614
+
+Mean OOS test score:    2.806
+Median OOS test score:  2.806
+
+Suggested SCORE_WEIGHTS (mean of per-fold winners, renormalized):
+    "technical":        0.145,
+    "fundamental":      0.083,
