@@ -283,6 +283,17 @@ def main(argv: list[str] | None = None) -> int:
                    choices=["sharpe", "sortino", "calmar", "cagr",
                             "monotonicity", "q5_q1", "sharpe_mono"],
                    default="sharpe")
+    p.add_argument("--rank-by",
+                   choices=["train", "test", "consistent", "min"],
+                   default="train",
+                   help="how to pick per-fold winner: 'train' (legacy, "
+                        "overfits), 'test' (OOS-best), 'consistent' (test "
+                        "minus 0.5*|train-test|; rewards small generalization "
+                        "gap — RECOMMENDED), 'min' (worst-of-two; most "
+                        "conservative). Anything other than 'train' costs "
+                        "2x backtests since every candidate is tested.")
+    p.add_argument("--gap-penalty", type=float, default=0.5,
+                   help="lambda in 'consistent' rank-by: test - lambda*|train-test|")
     p.add_argument("--walk-forward", action="store_true",
                    help="rolling 3y train / 1y test windows")
     p.add_argument("--train-years", type=int, default=3)
@@ -378,23 +389,76 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 best_indicator = ""
                 
-            log.info("  Candidate %d/%d [%s] -> Score: %.3f (Sharpe: %.2f, Mono: %.2f, CAGR: %.1f%%, DD: %.1f%%)%s",
+            log.info("  Train Candidate %d/%d [%s] -> Score: %.3f (Sharpe: %.2f, Mono: %.2f, CAGR: %.1f%%, DD: %.1f%%)%s",
                      ci + 1, len(candidates), w_str, score, stats["sharpe"], stats["monotonicity"], stats["cagr"], stats["max_dd"], best_indicator)
 
-        # 2) pick best on TRAIN, evaluate on TEST
-        train_results.sort(key=lambda x: x[1], reverse=True)
-        best_ci, best_train_score, best_train_stats = train_results[0]
-        best_w = candidates[best_ci]
+        # 2) Decide who wins this fold.
+        # Legacy behavior: pick the candidate with the highest TRAIN score and
+        # test only that one. Cheap but the textbook overfitting trap — the
+        # best-train candidate often collapses OOS (e.g. train mono +0.9 →
+        # test mono -0.2). The newer rank-by modes test EVERY candidate on
+        # the test window too, then rank by a metric that explicitly rewards
+        # train→test stability.
+        per_candidate_test: dict[int, dict] = {}
+        if args.rank_by == "train":
+            # Cheap path — only test the train winner.
+            train_results.sort(key=lambda x: x[1], reverse=True)
+            best_ci, best_train_score, best_train_stats = train_results[0]
+            best_w = candidates[best_ci]
+            test_stats = _run_backtest(data, test_dates, best_w,
+                                       args.capital, args.threshold, args.max_positions)
+            best_test_score = _objective_value(test_stats, args.objective)
+            per_candidate_test[best_ci] = test_stats
+        else:
+            # Honest path — score every candidate on the test window too.
+            log.info("  test: scoring all %d candidates OOS (rank-by=%s)",
+                     len(candidates), args.rank_by)
+            for ci, _, _ in train_results:
+                ts_stats = _run_backtest(data, test_dates, candidates[ci],
+                                         args.capital, args.threshold,
+                                         args.max_positions)
+                per_candidate_test[ci] = ts_stats
+                
+                # Format active weights nicely
+                w = candidates[ci]
+                w_str = ", ".join(f"{f[:4].capitalize()}:{w[f]:.2f}" for f in ACTIVE_FACTORS)
+                te_score = _objective_value(ts_stats, args.objective)
+                
+                log.info("  Test Candidate %d/%d [%s] -> Score: %.3f (Sharpe: %.2f, Mono: %.2f, CAGR: %.1f%%, DD: %.1f%%)",
+                         ci + 1, len(candidates), w_str, te_score, ts_stats["sharpe"], ts_stats["monotonicity"], ts_stats["cagr"], ts_stats["max_dd"])
 
-        test_stats = _run_backtest(data, test_dates, best_w,
-                                   args.capital, args.threshold, args.max_positions)
-        test_score = _objective_value(test_stats, args.objective)
+            # Combined metric per candidate
+            def _combined(ci: int, tr_score: float) -> float:
+                te_score = _objective_value(per_candidate_test[ci], args.objective)
+                if not np.isfinite(te_score) or te_score <= -98:
+                    return -99.0
+                if args.rank_by == "test":
+                    return te_score
+                if args.rank_by == "min":
+                    return min(tr_score, te_score)
+                # 'consistent': reward small train→test gap
+                return te_score - args.gap_penalty * abs(tr_score - te_score)
+
+            scored = [(ci, _combined(ci, tr_s), tr_s, stats)
+                      for ci, tr_s, stats in train_results]
+            scored.sort(key=lambda x: x[1], reverse=True)
+            best_ci, _, best_train_score, best_train_stats = scored[0]
+            best_w = candidates[best_ci]
+            test_stats = per_candidate_test[best_ci]
+            best_test_score = _objective_value(test_stats, args.objective)
+            # Replace train_results ordering so the top-10 CSV reflects the
+            # chosen rank-by criterion, not raw train score.
+            train_results = [(ci, tr_s, stats) for ci, _, tr_s, stats in scored]
+
+        test_score = best_test_score
 
         fold_records.append({
             "fold": fold_idx + 1, "train": f"{ts}..{te}", "test": f"{vs}..{ve}",
             "best_candidate": best_ci,
+            "rank_by": args.rank_by,
             "train_score": round(best_train_score, 3),
             "test_score": round(test_score, 3),
+            "gap": round(abs(best_train_score - test_score), 3),
             "test_cagr": round(test_stats["cagr"], 2),
             "test_sharpe": round(test_stats["sharpe"], 3),
             "test_max_dd": round(test_stats["max_dd"], 2),
@@ -405,15 +469,25 @@ def main(argv: list[str] | None = None) -> int:
                if k in ACTIVE_FACTORS},
         })
 
-        # Also keep top-10 by-train table for diagnostics
+        # Also keep top-10 by-train table for diagnostics. When rank-by != train,
+        # the order reflects the combined criterion (test-honest) instead.
         top10 = []
         for ci, s, st in train_results[:10]:
+            te_stats = per_candidate_test.get(ci)
+            te_score = (_objective_value(te_stats, args.objective)
+                        if te_stats else None)
             row = {"candidate": ci, "train_score": round(s, 3),
+                   "test_score": round(te_score, 3) if te_score is not None else "",
+                   "gap": round(abs(s - te_score), 3) if te_score is not None else "",
                    "trades": st["trades"], "cagr": round(st["cagr"], 2),
                    "sharpe": round(st["sharpe"], 3),
                    "max_dd": round(st["max_dd"], 2),
                    "mono": round(st["monotonicity"], 3),
-                   "q5_q1": round(st["q5_q1"], 2)}
+                   "q5_q1": round(st["q5_q1"], 2),
+                   "test_mono": (round(te_stats["monotonicity"], 3)
+                                 if te_stats else ""),
+                   "test_q5_q1": (round(te_stats["q5_q1"], 2)
+                                  if te_stats else "")}
             row.update({f"w_{k}": round(candidates[ci][k], 3)
                         for k in ACTIVE_FACTORS})
             top10.append(row)
