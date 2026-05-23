@@ -62,15 +62,15 @@ WATCHLIST = WATCHLIST_INDIA + WATCHLIST_US
 # fought momentum. Fix: concentrate weight on the two proven alpha factors
 # (RS momentum + earnings drift) and demote mean-reversion signals.
 SCORE_WEIGHTS = {
-    "momentum":       0.40,   # RS 12-1 is king — single strongest predictor
-    "earnings_drift": 0.30,   # earnings acceleration/surprise (PEAD anomaly)
-    "technical":      0.05,   # trend-following only (remove RSI/MACD noise)
-    "fundamental":    0.05,   # minimal — revenue growth rate signal only
-    "quality":        0.10,   # avoid frauds, don't reward boringness
-    "sentiment":      0.05,   # insider buying signal
-    "options":        0.05,   # unusual activity = smart money (US only)
-    "forecast":       0.00,   # disabled
-    "valuation":      0.00,   # handled cross-sectionally (post-processor)
+    "momentum":       0.232,  # Optimized
+    "earnings_drift": 0.151,  # Optimized
+    "technical":      0.127,  # Optimized
+    "fundamental":    0.413,  # Optimized (Value/GARP anchor)
+    "quality":        0.077,  # Optimized (renormalized to sum exactly to 1.0)
+    "sentiment":      0.00,
+    "options":        0.00,
+    "forecast":       0.00,
+    "valuation":      0.00,
 }
 # Sanity check at import: weights MUST sum to 1.0 or backtest composites
 # come out scaled (e.g. sum=0.85 → top scores ~68 instead of 80, blowing
