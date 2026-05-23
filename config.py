@@ -62,11 +62,11 @@ WATCHLIST = WATCHLIST_INDIA + WATCHLIST_US
 # fought momentum. Fix: concentrate weight on the two proven alpha factors
 # (RS momentum + earnings drift) and demote mean-reversion signals.
 SCORE_WEIGHTS = {
-    "momentum":       0.232,  # Optimized
-    "earnings_drift": 0.151,  # Optimized
-    "technical":      0.127,  # Optimized
-    "fundamental":    0.413,  # Optimized (Value/GARP anchor)
-    "quality":        0.077,  # Optimized (renormalized to sum exactly to 1.0)
+    "momentum":       0.021,  # Optimized
+    "earnings_drift": 0.614,  # Optimized (Core PEAD Alpha Engine)
+    "technical":      0.145,  # Optimized
+    "fundamental":    0.083,  # Optimized
+    "quality":        0.137,  # Optimized (Renormalized to sum exactly to 1.0)
     "sentiment":      0.00,
     "options":        0.00,
     "forecast":       0.00,

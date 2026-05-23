@@ -1,2 +1,2 @@
-fold,train,test,best_candidate,train_score,test_score,test_cagr,test_sharpe,test_max_dd,test_trades,test_mono,test_q5_q1,w_technical,w_fundamental,w_momentum,w_quality,w_earnings_drift
-1,2019-01-01..2023-11-23,2023-11-24..2025-12-30,6,2.894,0.048,12.14,0.448,-18.09,302,-0.2,-10.08,0.127,0.413,0.232,0.078,0.151
+fold,train,test,best_candidate,rank_by,train_score,test_score,gap,test_cagr,test_sharpe,test_max_dd,test_trades,test_mono,test_q5_q1,w_technical,w_fundamental,w_momentum,w_quality,w_earnings_drift
+1,2014-01-01..2022-05-30,2022-05-31..2025-12-30,19,train,2.744,2.806,0.062,17.66,0.806,-21.52,586,1.0,8.03,0.145,0.083,0.021,0.137,0.614
