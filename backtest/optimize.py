@@ -264,6 +264,24 @@ def _walk_forward_windows(start: str, end: str,
 
 
 def main(argv: list[str] | None = None) -> int:
+    def _safe_to_csv(df_to_save: pd.DataFrame, path: Path):
+        try:
+            df_to_save.to_csv(path, index=False)
+            log.info("Successfully saved results to %s", path)
+        except PermissionError:
+            import time
+            timestamp = int(time.time())
+            backup_path = path.parent / f"{path.stem}_backup_{timestamp}.csv"
+            log.error("❌ Permission Denied when saving to %s! The file might be open in Excel.", path)
+            log.warning("⚠️ Saving to backup file instead: %s", backup_path)
+            try:
+                df_to_save.to_csv(backup_path, index=False)
+                log.info("Successfully saved backup to %s", backup_path)
+            except Exception as e:
+                log.critical("🚨 Failed to save even the backup file: %s", e)
+        except Exception as e:
+            log.critical("🚨 Unexpected error saving to %s: %s", path, e)
+
     p = argparse.ArgumentParser(description="Walk-forward weight optimizer.")
     p.add_argument("--start", required=True)
     p.add_argument("--end", required=True)
@@ -491,13 +509,12 @@ def main(argv: list[str] | None = None) -> int:
             row.update({f"w_{k}": round(candidates[ci][k], 3)
                         for k in ACTIVE_FACTORS})
             top10.append(row)
-        pd.DataFrame(top10).to_csv(
-            output_dir / f"fold{fold_idx + 1}_top10_train.csv", index=False)
+        _safe_to_csv(pd.DataFrame(top10), output_dir / f"fold{fold_idx + 1}_top10_train.csv")
 
     # ── Save & summarize ─────────────────────────────────────────────
     df = pd.DataFrame(fold_records)
     out_csv = output_dir / "walk_forward_results.csv"
-    df.to_csv(out_csv, index=False)
+    _safe_to_csv(df, out_csv)
 
     print("\n" + "=" * 80)
     print(f"WALK-FORWARD RESULTS (objective: {args.objective})")
