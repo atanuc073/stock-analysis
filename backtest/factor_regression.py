@@ -186,19 +186,160 @@ def _quintile_monotonicity(df: pd.DataFrame, composite: np.ndarray) -> tuple[flo
     return mono, spread
 
 
-def _evaluate(df: pd.DataFrame, w: np.ndarray) -> dict:
-    """All metrics for a candidate w on a given dataset slice."""
+def _topk_basket_return(
+    df: pd.DataFrame,
+    composite: np.ndarray,
+    top_pct: float = 0.2,
+    horizon_days: int = 21,
+) -> float:
+    """Annualized expected return of an equal-weight top-`top_pct` basket.
+
+    Reporting metric only (rank-based / non-differentiable). For each rebalance
+    date, pick the top `top_pct` of stocks by composite score, equal-weight them,
+    take the mean of their forward returns. Average across dates and annualize
+    arithmetically as `mean * 252 / horizon_days`.
+
+    This is the closest CAGR proxy that matches the real long-only top-quintile
+    portfolio you would actually trade. It overstates true geometric CAGR by
+    approximately sigma^2 / 2 (volatility drag), but the relative ordering
+    across candidate weight vectors is preserved.
+
+    NOTE: Not used inside the SLSQP objective because `nlargest` is piecewise
+    constant in w (zero gradient almost everywhere). The optimizer uses the
+    differentiable softmax basket below.
+    """
+    s = df.assign(composite=composite)
+
+    def _basket(g: pd.DataFrame) -> float:
+        n_top = max(1, int(round(len(g) * top_pct)))
+        return float(g.nlargest(n_top, "composite")["fwd_ret"].mean())
+
+    per_period = s.groupby("date").apply(_basket, include_groups=False).dropna()
+    if len(per_period) == 0:
+        return 0.0
+    periods_per_year = 252.0 / max(int(horizon_days), 1)
+    return float(per_period.mean() * periods_per_year)
+
+
+def _precompute_groups(df: pd.DataFrame) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Pre-split (factor_matrix, fwd_ret_vector) per date for fast objective eval.
+
+    Avoids pandas.groupby.apply inside SLSQP's inner loop. Returns a list of
+    (F_d, r_d) tuples, one per unique date, where F_d is (n_stocks_d, n_factors)
+    and r_d is (n_stocks_d,).
+    """
+    groups: list[tuple[np.ndarray, np.ndarray]] = []
+    for _, g in df.groupby("date", sort=False):
+        F_d = g[FACTORS].to_numpy(dtype=np.float64, copy=False)
+        r_d = g["fwd_ret"].to_numpy(dtype=np.float64, copy=False)
+        # Drop rows with any NaN in factors or fwd_ret
+        mask = np.isfinite(F_d).all(axis=1) & np.isfinite(r_d)
+        if mask.sum() < 2:
+            continue
+        groups.append((F_d[mask], r_d[mask]))
+    return groups
+
+
+def _softmax_basket_return_grouped(
+    groups: list[tuple[np.ndarray, np.ndarray]],
+    w: np.ndarray,
+    beta: float,
+    horizon_days: int,
+) -> float:
+    """Smooth, differentiable analogue of the top-K basket.
+
+    For each date d:
+        composite_i = F_d[i] . w
+        p_i = softmax(beta * composite_i)               # portfolio weights, sum to 1
+        r_port_d = sum_i p_i * r_d[i]                   # weighted forward return
+    Then return arithmetic annualization of mean(r_port_d).
+
+    As beta -> infinity, p concentrates on argmax(composite) and r_port -> top-1
+    return. As beta -> 0, p -> uniform and r_port -> universe mean. A finite
+    beta (e.g. 5-20) corresponds roughly to top-decile through top-quintile mass.
+
+    Crucially, r_port is C-infinity smooth in w, so SLSQP's finite-difference
+    gradients carry real information about how to move w to raise basket return.
+    """
+    if not groups:
+        return 0.0
+    total = 0.0
+    n = 0
+    for F_d, r_d in groups:
+        z = F_d @ w
+        # Numerical stability: subtract max before exp
+        z = beta * z
+        z -= z.max()
+        p = np.exp(z)
+        s = p.sum()
+        if s <= 0 or not np.isfinite(s):
+            continue
+        p /= s
+        total += float(p @ r_d)
+        n += 1
+    if n == 0:
+        return 0.0
+    periods_per_year = 252.0 / max(int(horizon_days), 1)
+    return (total / n) * periods_per_year
+
+
+def _evaluate(
+    df: pd.DataFrame,
+    w: np.ndarray,
+    top_pct: float = 0.2,
+    horizon_days: int = 21,
+    beta: float = 10.0,
+) -> dict:
+    """All metrics for a candidate w on a given dataset slice.
+
+    Reports BOTH:
+      - top_ret:     hard top-`top_pct` basket annualized return (what you'd trade)
+      - soft_ret:    softmax-basket annualized return at the same beta the
+                     optimizer used (sanity check that optimizer's surrogate
+                     matches the reporting metric)
+    """
     F = df[FACTORS].values
     composite = F @ w
     ic = _grouped_ic(df, composite)
     mono, spread = _quintile_monotonicity(df, composite)
-    return {"ic": ic, "mono": mono, "q5q1": spread}
+    top_ret = _topk_basket_return(df, composite, top_pct=top_pct, horizon_days=horizon_days)
+    groups = _precompute_groups(df)
+    soft_ret = _softmax_basket_return_grouped(groups, w, beta=beta, horizon_days=horizon_days)
+    return {"ic": ic, "mono": mono, "q5q1": spread, "top_ret": top_ret, "soft_ret": soft_ret}
 
 
 # ── Optimization ──────────────────────────────────────────────────────────────
-def _make_objective(df: pd.DataFrame, lambda_mono: float):
-    """Closure: returns scalar to MINIMIZE (negative of J)."""
+def _make_objective(
+    df: pd.DataFrame,
+    lambda_mono: float,
+    lambda_cagr: float = 0.0,
+    beta: float = 10.0,
+    horizon_days: int = 21,
+):
+    """Closure: returns scalar to MINIMIZE (negative of J).
+
+    J(w) = IC + lambda_mono * Mono + lambda_cagr * SoftmaxBasket_AnnRet
+
+    The SoftmaxBasket term is a *differentiable surrogate* for the hard top-K
+    basket return. Concretely, portfolio weights on date d are
+        p_i(w) = softmax(beta * F_d[i] . w)
+    so the basket return is C-infinity in w and SLSQP's finite-difference
+    gradients carry meaningful information about how to raise CAGR.
+
+    As beta -> inf, the softmax basket converges to the hard top-1 basket.
+    Practical values: beta=5 (broad ~top-half tilt), beta=10 (~top-decile mass),
+    beta=20 (~top-5%). Default beta=10 ~ top-decile.
+
+    Set lambda_cagr=0 to skip the (somewhat expensive) basket term and recover
+    the legacy IC + lambda_mono*Mono objective. Scales of the three terms:
+      IC          ~ 0.02 .. 0.05
+      Mono        ~ 0.5  .. 1.0
+      SoftBasket  ~ 0.10 .. 0.30 (annualized)
+    Default lambdas (mono=0.5, cagr=1.0) put all three on a comparable scale.
+    """
     F = df[FACTORS].values
+    # Precompute groups once for the softmax-basket fast path
+    groups = _precompute_groups(df) if lambda_cagr > 0 else []
 
     def _neg_J(w: np.ndarray) -> float:
         # Renormalize defensively (SLSQP keeps sum=1 but tiny drift happens)
@@ -209,7 +350,11 @@ def _make_objective(df: pd.DataFrame, lambda_mono: float):
         composite = F @ wn
         ic = _grouped_ic(df, composite)
         mono, _ = _quintile_monotonicity(df, composite)
-        return -(ic + lambda_mono * mono)
+        if lambda_cagr > 0:
+            soft_ret = _softmax_basket_return_grouped(groups, wn, beta=beta, horizon_days=horizon_days)
+        else:
+            soft_ret = 0.0
+        return -(ic + lambda_mono * mono + lambda_cagr * soft_ret)
 
     return _neg_J
 
@@ -218,11 +363,15 @@ def search_weights(
     df_train: pd.DataFrame,
     n_starts: int = 200,
     lambda_mono: float = 0.5,
+    lambda_cagr: float = 0.0,
+    beta: float = 10.0,
+    horizon_days: int = 21,
     seed: int = 42,
 ) -> list[tuple[np.ndarray, float]]:
     """SLSQP from many random Dirichlet starts on TRAIN ONLY."""
     rng = np.random.default_rng(seed)
-    neg_J = _make_objective(df_train, lambda_mono)
+    neg_J = _make_objective(df_train, lambda_mono, lambda_cagr=lambda_cagr,
+                            beta=beta, horizon_days=horizon_days)
     n = len(FACTORS)
     bounds = [(0.0, 1.0)] * n
     constraints = [{"type": "eq", "fun": lambda w: float(w.sum() - 1.0)}]
@@ -233,7 +382,8 @@ def search_weights(
     n_dup = 0
     best_J = -np.inf
     log_every = max(1, n_starts // 20)
-    log.info("Starting SLSQP search: %d random Dirichlet starts, lambda_mono=%.2f", n_starts, lambda_mono)
+    log.info("Starting SLSQP search: %d random Dirichlet starts, lambda_mono=%.2f, lambda_cagr=%.2f (beta=%.1f, softmax basket)",
+             n_starts, lambda_mono, lambda_cagr, beta)
     pbar = tqdm(range(n_starts), desc="SLSQP starts", unit="start")
     for i in pbar:
         x0 = rng.dirichlet(np.ones(n))
@@ -303,6 +453,18 @@ def main() -> None:
                     help="Random Dirichlet restarts for SLSQP.")
     ap.add_argument("--lambda-mono", type=float, default=0.5,
                     help="Weight of monotonicity in objective.")
+    ap.add_argument("--lambda-cagr", type=float, default=1.0,
+                    help="Weight of softmax-basket annualized return in objective "
+                         "(set 0 to disable; default 1.0). Differentiable surrogate "
+                         "for top-K basket CAGR; SLSQP can actually climb its gradient.")
+    ap.add_argument("--beta", type=float, default=10.0,
+                    help="Softmax sharpness for basket return surrogate. Higher = more "
+                         "concentrated basket. beta=5 ~ top-half tilt, beta=10 ~ top-decile, "
+                         "beta=20 ~ top-5%%. Default 10.")
+    ap.add_argument("--top-pct", type=float, default=0.2,
+                    help="Top fraction of stocks per date for the *reporting* hard-basket "
+                         "AnnRet metric (default 0.2 = top quintile). This is the basket "
+                         "you would actually trade; it does NOT enter the SLSQP objective.")
     ap.add_argument("--top-k", type=int, default=20)
     ap.add_argument("--cache-matrix", default=None,
                     help="Parquet path for the (stock x date) factor matrix. "
@@ -414,7 +576,14 @@ def main() -> None:
         log.warning("One split has <100 rows. Results will be noisy.")
 
     # ── Fit on train ──────────────────────────────────────────────────────────
-    candidates = search_weights(train, n_starts=args.n_starts, lambda_mono=args.lambda_mono)
+    candidates = search_weights(
+        train,
+        n_starts=args.n_starts,
+        lambda_mono=args.lambda_mono,
+        lambda_cagr=args.lambda_cagr,
+        beta=args.beta,
+        horizon_days=args.horizon_days,
+    )
     if not candidates:
         log.error("No candidates produced. Check data / objective.")
         return
@@ -424,16 +593,17 @@ def main() -> None:
     log.info("Evaluating top %d candidates on train / val / test ...", K)
     rows = []
     for i, (w, j_train) in enumerate(tqdm(candidates[:K], desc="Evaluating", unit="cand"), 1):
-        m_tr = _evaluate(train, w)
-        m_va = _evaluate(val, w)
-        m_te = _evaluate(test, w)
+        m_tr = _evaluate(train, w, top_pct=args.top_pct, horizon_days=args.horizon_days, beta=args.beta)
+        m_va = _evaluate(val,   w, top_pct=args.top_pct, horizon_days=args.horizon_days, beta=args.beta)
+        m_te = _evaluate(test,  w, top_pct=args.top_pct, horizon_days=args.horizon_days, beta=args.beta)
         # Generalization gap (train IC vs val IC) — overfit detector
         gap = m_tr["ic"] - m_va["ic"]
-        log.info("  Cand %2d/%d  w=[%s]  IC tr/va/te = %+.3f / %+.3f / %+.3f  Mono tr/va/te = %+.2f / %+.2f / %+.2f  gap=%+.3f",
+        log.info("  Cand %2d/%d  w=[%s]  IC tr/va/te=%+.3f/%+.3f/%+.3f  Mono=%+.2f/%+.2f/%+.2f  TopRet=%+.1f%%/%+.1f%%/%+.1f%%  gap=%+.3f",
                  i, K,
                  ", ".join(f"{f[:4]}:{wv:.2f}" for f, wv in zip(FACTORS, w)),
                  m_tr["ic"], m_va["ic"], m_te["ic"],
-                 m_tr["mono"], m_va["mono"], m_te["mono"], gap)
+                 m_tr["mono"], m_va["mono"], m_te["mono"],
+                 100*m_tr["top_ret"], 100*m_va["top_ret"], 100*m_te["top_ret"], gap)
         rows.append({
             "rank": i,
             **{f"w_{f}": round(float(w[k]), 4) for k, f in enumerate(FACTORS)},
@@ -447,12 +617,22 @@ def main() -> None:
             "Q5Q1_train_pct": round(m_tr["q5q1"], 2),
             "Q5Q1_val_pct":   round(m_va["q5q1"], 2),
             "Q5Q1_test_pct":  round(m_te["q5q1"], 2),
+            "TopRet_train_pct": round(100 * m_tr["top_ret"], 2),
+            "TopRet_val_pct":   round(100 * m_va["top_ret"], 2),
+            "TopRet_test_pct":  round(100 * m_te["top_ret"], 2),
             "gap_ic": round(gap, 4),
         })
     out = pd.DataFrame(rows)
 
-    # Also rank by val-consistency (the honest selection rule)
-    out["val_consistent"] = out["IC_val"] - 0.5 * out["gap_ic"].abs()
+    # Val-consistency ranking now blends IC, monotonicity, AND top-basket return
+    # on the val split, penalized by train→val IC gap. Tuned so each component
+    # contributes comparably (TopRet is on [0,1], IC ~ [0, 0.05], Mono ~ [-1, 1]).
+    out["val_consistent"] = (
+        out["IC_val"]
+        + 0.05 * out["Mono_val"]
+        + 0.20 * (out["TopRet_val_pct"] / 100.0)
+        - 0.5 * out["gap_ic"].abs()
+    )
     out = out.sort_values("val_consistent", ascending=False).reset_index(drop=True)
     out.insert(0, "rank_by_val_consistent", out.index + 1)
 
@@ -465,17 +645,18 @@ def main() -> None:
     out_by_train.to_csv(os.path.join(args.output_dir, "candidates_by_train.csv"), index=False)
 
     # ── Console summary ──────────────────────────────────────────────────────
-    pd.set_option("display.width", 200)
-    pd.set_option("display.max_columns", 30)
+    pd.set_option("display.width", 220)
+    pd.set_option("display.max_columns", 40)
 
-    print("\n" + "=" * 110)
-    print(f"FACTOR REGRESSION — top {K} candidates  (sorted by val_consistent = IC_val − 0.5·|train→val gap|)")
+    print("\n" + "=" * 130)
+    print(f"FACTOR REGRESSION — top {K} candidates  (sorted by val_consistent: IC_val + 0.05·Mono_val + 0.20·TopRet_val − 0.5·|train→val IC gap|)")
     print(f"  splits: train {args.train_start}..{args.train_end} | val {args.val_start}..{args.val_end} | test {args.test_start}..{args.test_end}")
-    print(f"  horizon={args.horizon_days}d  freq={args.freq}  lambda_mono={args.lambda_mono}  n_starts={args.n_starts}")
-    print("=" * 110)
+    print(f"  horizon={args.horizon_days}d  freq={args.freq}  lambda_mono={args.lambda_mono}  lambda_cagr={args.lambda_cagr}  beta={args.beta}  top_pct={args.top_pct}  n_starts={args.n_starts}")
+    print("=" * 130)
     cols = ["rank_by_val_consistent"] + [f"w_{f}" for f in FACTORS] + [
         "IC_train", "IC_val", "IC_test",
         "Mono_train", "Mono_val", "Mono_test",
+        "TopRet_train_pct", "TopRet_val_pct", "TopRet_test_pct",
         "Q5Q1_train_pct", "Q5Q1_val_pct", "Q5Q1_test_pct",
         "gap_ic",
     ]
@@ -490,9 +671,9 @@ def main() -> None:
     for f in FACTORS:
         print(f"    {f:16s} = {best['w_' + f]:.4f}")
     print("  Performance:")
-    print(f"    {'split':<8}  {'IC':>8}  {'Mono':>8}  {'Q5-Q1 %':>10}")
+    print(f"    {'split':<8}  {'IC':>8}  {'Mono':>8}  {'Q5-Q1 %':>10}  {'TopRet %':>10}")
     for split_name in ["train", "val", "test"]:
-        print(f"    {split_name:<8}  {best['IC_' + split_name]:>+8.4f}  {best['Mono_' + split_name]:>+8.3f}  {best['Q5Q1_' + split_name + '_pct']:>+10.3f}")
+        print(f"    {split_name:<8}  {best['IC_' + split_name]:>+8.4f}  {best['Mono_' + split_name]:>+8.3f}  {best['Q5Q1_' + split_name + '_pct']:>+10.3f}  {best['TopRet_' + split_name + '_pct']:>+10.2f}")
     print(f"  Train→Val IC gap: {best['gap_ic']:+.4f}")
 
     # ── Diagnosis ────────────────────────────────────────────────────────────
@@ -532,6 +713,11 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
 
 
 
