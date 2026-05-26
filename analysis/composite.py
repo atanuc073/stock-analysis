@@ -180,23 +180,24 @@ def analyze_batch(tickers: Iterable[TickerData]) -> list[StockReport]:
     #   - max extension above 200DMA: 25%
     #   - require ≥10% pullback from 52WH (NO breakout exception —
     #     aligned with May'26 validated backtest config).
-    MAX_EXTENSION_PCT = 25.0
-    MAX_PCT_FROM_52WH = -10.0
-    for r in reports:
-        if r.verdict not in ("BUY", "STRONG BUY"):
-            continue
-        ext = float(r.technical.get("pct_above_sma200") or 0.0)
-        pct_from_high = float(r.technical.get("pct_from_52w_high") or 0.0)
-        chase_extension = ext > MAX_EXTENSION_PCT
-        chase_high = pct_from_high > MAX_PCT_FROM_52WH
-        if chase_extension or chase_high:
-            reasons = []
-            if chase_extension:
-                reasons.append(f"+{ext:.0f}% over 200DMA")
-            if chase_high:
-                reasons.append(f"{pct_from_high:+.1f}% from 52WH (need <= {MAX_PCT_FROM_52WH:.0f}%)")
-            r.verdict = "HOLD"
-            r.all_signals.append(
-                "⛔ Entry guard: " + ", ".join(reasons) + " — downgraded BUY→HOLD"
-            )
+    # 5. Entry-quality guards (Bypassed to align 100% with unfiltered backtesting/WFO)
+    # MAX_EXTENSION_PCT = 25.0
+    # MAX_PCT_FROM_52WH = -10.0
+    # for r in reports:
+    #     if r.verdict not in ("BUY", "STRONG BUY"):
+    #         continue
+    #     ext = float(r.technical.get("pct_above_sma200") or 0.0)
+    #     pct_from_high = float(r.technical.get("pct_from_52w_high") or 0.0)
+    #     chase_extension = ext > MAX_EXTENSION_PCT
+    #     chase_high = pct_from_high > MAX_PCT_FROM_52WH
+    #     if chase_extension or chase_high:
+    #         reasons = []
+    #         if chase_extension:
+    #             reasons.append(f"+{ext:.0f}% over 200DMA")
+    #         if chase_high:
+    #             reasons.append(f"{pct_from_high:+.1f}% from 52WH (need <= {MAX_PCT_FROM_52WH:.0f}%)")
+    #         r.verdict = "HOLD"
+    #         r.all_signals.append(
+    #             "⛔ Entry guard: " + ", ".join(reasons) + " — downgraded BUY→HOLD"
+    #         )
     return reports
