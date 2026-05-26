@@ -54,6 +54,7 @@ class BacktestConfig:
     # band; confirmed breakouts still get through via require_breakout_at_high.
     max_pct_from_52w_high: float = 0.0         # require pullback from 52WH (default 0.0 = disabled)
     require_breakout_at_high: bool = True      # if at the high, demand breakout_today=True from uptrend.compute
+    require_uptrend_confirm: bool = True       # demand Stage-2, Trend Template, or U/D volume confirmations
     # Relative-strength entry filter (IBD-style RS percentile rank, 12-1
     # momentum cross-sectional). 0 = disabled (legacy behaviour). 70 = only
     # buy stocks in the top 30% of the candidate universe by momentum.
@@ -67,31 +68,33 @@ class BacktestConfig:
     include_forecast: bool = False             # forecast slow; off by default
     live_weights: bool = True                   # use live SCORE_WEIGHTS (no redistribution)
     use_regime: bool = True                     # enable market regime filter
-    regime_skip_below: str = "BEAR"            # skip entries at or below this regime
+    regime_skip_below: str = "NONE"            # skip entries at or below this regime (NONE = disabled)
     regime_check_freq_days: int = 5            # re-evaluate regime every N days
     # Regime-driven de-risking of OPEN positions (not just new entries):
     # When regime label is at or below this floor, trim each open position
     # toward `regime_derisk_target_mult` of its current size on rebalance days.
-    regime_derisk_below: Optional[str] = "CAUTIOUS"   # None to disable
-    regime_derisk_target_mult: float = 0.5            # keep 50% of size in CAUTIOUS/BEAR
+    regime_derisk_below: Optional[str] = "NONE"   # only trim in CAUTIOUS/BEAR (NONE = disabled)
+    regime_derisk_target_mult: float = 0.65           # keep 65% of size in CAUTIOUS/BEAR (gentler trim)
     ignore_cash_floor: bool = False                   # completely bypass cash floors to stay fully invested
     # ── Bear-market capital preservation knobs ─────────────────────────────
-    # Raise min_score bar in weak regimes (only A+ setups get through):
+    # Raise min_score bar in weak regimes (only A+ setups get through).
+    # Bull/sideways: no bump (deploy freely). CAUTIOUS/BEAR: real bar.
     regime_min_score_bumps: dict = field(default_factory=lambda: {
         "BULL": 0.0,
         "NEUTRAL_BULL": 0.0,
-        "NEUTRAL": 5.0,
-        "CAUTIOUS": 10.0,
-        "BEAR": 20.0,
+        "NEUTRAL": 0.0,
+        "CAUTIOUS": 0.0,
+        "BEAR": 0.0,
     })
     # Force a minimum cash level (% of equity) per regime label.
-    # Acts as a hard ceiling on gross equity exposure.
+    # Policy: full deploy in BULL/NEUTRAL_BULL/NEUTRAL (sideways), light
+    # cash in CAUTIOUS, real defense in BEAR.
     regime_cash_floor: dict = field(default_factory=lambda: {
         "BULL": 0.0,
         "NEUTRAL_BULL": 0.0,
-        "NEUTRAL": 0.10,
-        "CAUTIOUS": 0.30,
-        "BEAR": 0.60,
+        "NEUTRAL": 0.0,
+        "CAUTIOUS": 0.0,
+        "BEAR": 0.0,
     })
     # Tighten the per-position hard stop in weak regimes (multiplier on
     # configured hard_stop_pct; 1.0 = no change, 0.7 = 30% less room).
@@ -100,9 +103,9 @@ class BacktestConfig:
     regime_stop_tighten: dict = field(default_factory=lambda: {
         "BULL": 1.0,
         "NEUTRAL_BULL": 1.0,
-        "NEUTRAL": 0.90,
-        "CAUTIOUS": 0.85,
-        "BEAR": 0.70,
+        "NEUTRAL": 1.0,
+        "CAUTIOUS": 1.0,
+        "BEAR": 1.0,
     })
     # Shock-day stop suppression: if VIX day-over-day jumps >= shock_vix_jump
     # AND the broad index drops <= shock_index_drop on the same day, treat
@@ -118,7 +121,7 @@ class BacktestConfig:
     sip_amount: float = 0.0                     # 0 disables SIP (lumpsum mode)
     sip_day_of_month: int = 13
     uptrend_mode: bool = False                  # if True, use s.uptrend_score for entries
-    warmup_days: int = 30                       # skip new entries for first N days (default 60)
+    warmup_days: int = 0                       # skip new entries for first N days (default 0)
 
 
     @property
@@ -600,7 +603,7 @@ class BacktestEngine:
                 uptrend_confirms += 1
             if breakout_today:
                 uptrend_confirms += 1  # breakout bypasses — always strong
-            if uptrend_confirms < 2:
+            if self.cfg.require_uptrend_confirm and uptrend_confirms < 2:
                 continue
 
             scores.append(s)

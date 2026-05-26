@@ -112,8 +112,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="Initial capital (default: 1,000,000)")
     p.add_argument("--universe", default="watchlist",
                    help="watchlist | india | us | broad | RELIANCE.NS,TCS.NS,...")
-    p.add_argument("--threshold", type=float, default=60.0,
-                   help="Min composite score to buy (default 60)")
+    p.add_argument("--threshold", type=float, default=70.0,
+                   help="Min composite score to buy (default 70)")
     p.add_argument("--rebalance-days", type=int, default=5,
                    help="Rebalance every N trading days (default 5 = weekly)")
     p.add_argument("--max-positions", type=int, default=12)
@@ -146,6 +146,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="Output directory (default reports/backtest/)")
     p.add_argument("--uptrend", action="store_true",
                    help="Uptrend-only mode: use the Stage 2 / breakout score as the primary signal")
+    p.add_argument("--no-uptrend-confirm", action="store_true",
+                   help="Bypass strict Minervini Stage 2 / Trend Template filters and buy purely on score ranking.")
     p.add_argument("--max-workers", type=int, default=8,
                    help="Concurrent fetches (default 8)")
     p.add_argument("--benchmark-india", default="^NSEI")
@@ -156,9 +158,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="US smallcap benchmark (default Russell 2000: ^RUT)")
     p.add_argument("--no-regime", action="store_true",
                    help="Disable regime-aware sizing (default: enabled)")
-    p.add_argument("--regime-skip-below", default="CAUTIOUS",
-                   choices=["BEAR", "CAUTIOUS", "NEUTRAL", "NEUTRAL_BULL", "BULL"],
-                   help="Skip new entries when regime label <= this (default CAUTIOUS — "
+    p.add_argument("--regime-skip-below", default="NONE",
+                   choices=["NONE", "BEAR", "CAUTIOUS", "NEUTRAL", "NEUTRAL_BULL", "BULL"],
+                   help="Skip new entries when regime label <= this (default NONE — "
                         "May'26 audit showed CAUTIOUS trades contribute ~0% of P&L)")
     p.add_argument("--sip-amount", type=float, default=0.0,
                    help="SIP amount per month (INR). 0 = lumpsum mode (default)")
@@ -171,9 +173,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="Transaction cost in bps (each side, one-way)")
     p.add_argument("--slippage-bps", type=float, default=0.0,
                    help="Slippage in bps (each side, one-way)")
-    p.add_argument("--warmup-days", type=int, default=60,
-                   help="Skip new entries for the first N trading days (default 60 = "
-                        "minimum for indicators). Data-loader fetches extra history separately.")
+    p.add_argument("--warmup-days", type=int, default=0,
+                   help="Skip new entries for the first N trading days (default 0 = "
+                        "disabled). Data-loader fetches extra history separately.")
     args = p.parse_args(argv)
 
     output_dir = Path(args.output_dir) if args.output_dir else REPORTS_DIR / "backtest"
@@ -219,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         warmup_days=args.warmup_days,
         base_position_weight=args.base_position_weight,
         ignore_cash_floor=args.ignore_cash_floor,
+        require_uptrend_confirm=not args.no_uptrend_confirm,
     )
 
     # Pre-load benchmarks (also used as regime input)

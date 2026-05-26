@@ -61,52 +61,29 @@ WATCHLIST = WATCHLIST_INDIA + WATCHLIST_US
 # Backtest score calibration was FLAT (Q1≈Q5) because quality/fundamental
 # fought momentum. Fix: concentrate weight on the two proven alpha factors
 # (RS momentum + earnings drift) and demote mean-reversion signals.
-# Deployed optimized weights (Candidate 20)
-# SCORE_WEIGHTS = {
-#     "momentum":       0.021,  # Optimized
-#     "earnings_drift": 0.614,  # Optimized (Core PEAD Alpha Engine)
-#     "technical":      0.145,  # Optimized
-#     "fundamental":    0.083,  # Optimized
-#     "quality":        0.137,  # Optimized (Renormalized to sum exactly to 1.0)
-#     "sentiment":      0.00,
-#     "options":        0.00,
-#     "forecast":       0.00,
-#     "valuation":      0.00,
-# }
 
-# User-requested weights (adjusted from sum=1.01 to sum=1.00 by setting fundamental=0.34)
+# Deployed optimized weights from Nifty 500 Bayesian WFO and factor regression
+# (Calibrated to WFO out-of-sample averages: 50% Quality, 30% Momentum, 20% Earnings Drift)
 # SCORE_WEIGHTS = {
-#     "technical":       0.036,
-#     "fundamental":     0.035,
-#     "momentum":        0.155,
-#     "quality":         0.321,
-#     "earnings_drift":  0.453,
+#     "technical":       0.000,
+#     "fundamental":     0.000,
+#     "momentum":        0.300,
+#     "quality":         0.500,
+#     "earnings_drift":  0.200,
 #     "sentiment":       0.00,
 #     "options":         0.00,
 #     "forecast":        0.00,
 #     "valuation":       0.00,
 # }
 
-# Optimized weights from Russell 1000 factor regression (adjusted slightly to sum to exactly 1.0)
-# SCORE_WEIGHTS = {
-#     "technical":       0.023,
-#     "fundamental":     0.030,  # Adjusted from 0.031 to sum exactly to 1.0
-#     "momentum":        0.051,
-#     "quality":         0.585,
-#     "earnings_drift":  0.311,
-#     "sentiment":       0.00,
-#     "options":         0.00,
-#     "forecast":        0.00,
-#     "valuation":       0.00,
-# }
-
-# Deployed optimized weights from Russell 1000 'softcagr' factor regression (adjusted to sum exactly to 1.0)
+# Deployed optimized weights from S&P 500 Bayesian WFO and factor regression
+# (Calibrated to WFO out-of-sample averages: 89% Quality, 10% Earnings Drift, 1% Momentum)
 SCORE_WEIGHTS = {
-    "technical":       0.251,
-    "fundamental":     0.028,  # Adjusted from 0.027 to sum exactly to 1.0
-    "momentum":        0.247,
-    "quality":         0.141,
-    "earnings_drift":  0.333,
+    "technical":       0.000,
+    "fundamental":     0.000,
+    "momentum":        0.010,
+    "quality":         0.890,
+    "earnings_drift":  0.100,
     "sentiment":       0.00,
     "options":         0.00,
     "forecast":        0.00,

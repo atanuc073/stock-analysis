@@ -33,8 +33,9 @@ LABELS = [
     ((0, 1), "BEAR"),
 ]
 ALLOCATION = {
-    "BULL": 1.0, "NEUTRAL_BULL": 0.85, "NEUTRAL": 0.70,
-    "CAUTIOUS": 0.45, "BEAR": 0.15,
+    # Bull/sideways: full deploy. Defense only in CAUTIOUS/BEAR.
+    "BULL": 1.0, "NEUTRAL_BULL": 1.0, "NEUTRAL": 1.0,
+    "CAUTIOUS": 0.65, "BEAR": 0.30,
 }
 SMA_SHORT = 50
 SMA_LONG = 200

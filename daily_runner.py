@@ -187,7 +187,7 @@ def _is_stopped_recently(symbol: str, trades: list, days: int = 30) -> bool:
 
 
 # ── Main runner ──────────────────────────────────────────────────────────────
-def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshold: float = 70.0) -> None:
+def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshold: float = 70.0, use_regime: bool = True) -> None:
     log.info("=== Daily Run @ %s | mode=%s ===", datetime.now().isoformat(timespec="seconds"), mode)
 
     # 1) Build services
@@ -199,6 +199,9 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshol
     flag_scanner = build_red_flag_scanner()
     tax_opt = build_tax_optimizer()
     gate = build_default_risk_gate()
+    if not use_regime:
+        from risk.checks import RegimeCheck
+        gate._checks = [c for c in gate._checks if not isinstance(c, RegimeCheck)]
 
     # 2) Universe + screening
     if mode == "broad":
@@ -240,6 +243,18 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshol
     # 3) Regime + sector ranks (parallel-safe but small enough sequential is fine)
     log.info("Detecting regime + sector rotation ...")
     regime = regime_det.detect()
+    if not use_regime:
+        from risk.interfaces import RegimeReport
+        regime = RegimeReport(
+            score=10,
+            label="BULL",
+            allocation_multiplier=1.0,
+            notes=["Regime filters and constraints disabled by --no-regime flag."],
+            per_market={
+                "IN": RegimeReport(score=10, label="BULL", allocation_multiplier=1.0),
+                "US": RegimeReport(score=10, label="BULL", allocation_multiplier=1.0),
+            }
+        )
     sector_lookup = sector_ranker.as_lookup()
 
     # 4) Live prices for open positions
@@ -303,7 +318,7 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshol
     # Regime-aware threshold bump (per-market): mirror backtest's regime_min_score_bumps.
     # Weak regimes demand higher-conviction setups. Per-market so US BULL is NOT
     # throttled when IN is BEAR (and vice-versa).
-    regime_bumps = {"BEAR": 15.0, "CAUTIOUS": 7.0, "NEUTRAL": 3.0}
+    regime_bumps = {"BEAR": 0.0, "CAUTIOUS": 0.0, "NEUTRAL": 0.0}
     per_market_regimes = getattr(regime, "per_market", {}) if regime else {}
     aggregate_label = getattr(regime, "label", "") if regime else ""
 
@@ -328,7 +343,7 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshol
     for r in reports:
         if r.symbol.upper() in held_set:
             continue
-        if r.composite_score < _effective_threshold_for(getattr(r, "market", "")):
+        if r.adjusted_score < _effective_threshold_for(getattr(r, "market", "")):
             continue
         if r.symbol.upper() in blacklist:
             log.info("Skipping %s — re-entry lock (stopped out recently)", r.symbol)
@@ -769,5 +784,6 @@ if __name__ == "__main__":
     p.add_argument("--top", type=int, default=TOP_N)
     p.add_argument("--threshold", type=float, default=70.0, help="Min composite score (default 70)")
     p.add_argument("--no-telegram", action="store_true")
+    p.add_argument("--no-regime", action="store_true", help="Bypass all regime-based checks and constraints.")
     args = p.parse_args()
-    run(mode=args.mode, top_n=args.top, send_tg=not args.no_telegram, threshold=args.threshold)
+    run(mode=args.mode, top_n=args.top, send_tg=not args.no_telegram, threshold=args.threshold, use_regime=not args.no_regime)

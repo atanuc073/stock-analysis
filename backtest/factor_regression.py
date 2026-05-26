@@ -431,6 +431,341 @@ def search_weights(
     return results
 
 
+# ── Bayesian (GP) weight optimization ─────────────────────────────────────────
+def _softmax(z: np.ndarray) -> np.ndarray:
+    """Map unconstrained ℝ^K → simplex via softmax."""
+    e = np.exp(z - z.max())
+    return e / e.sum()
+
+
+def _eval_objective_for_bayes(
+    df: pd.DataFrame,
+    w: np.ndarray,
+    groups: list[tuple[np.ndarray, np.ndarray]],
+    objective: str,
+    lambda_mono: float,
+    lambda_cagr: float,
+    beta: float,
+    horizon_days: int,
+) -> float:
+    """Evaluate a single objective value for Bayesian optimization.
+
+    Returns the value to MAXIMIZE.
+    """
+    F = df[FACTORS].values
+    composite = F @ w
+    ic = _grouped_ic(df, composite)
+
+    if objective == "ic":
+        return ic
+
+    mono, spread = _quintile_monotonicity(df, composite)
+    if objective == "mono":
+        return mono
+
+    if objective == "top_ret":
+        return _topk_basket_return(df, composite, top_pct=0.2, horizon_days=horizon_days)
+
+    # Default: blended (same as SLSQP objective)
+    soft_ret = 0.0
+    if lambda_cagr > 0 and groups:
+        soft_ret = _softmax_basket_return_grouped(groups, w, beta=beta, horizon_days=horizon_days)
+    return ic + lambda_mono * mono + lambda_cagr * soft_ret
+
+
+def _expected_improvement(
+    X_candidates: np.ndarray,
+    gp,
+    y_best: float,
+    xi: float = 0.01,
+) -> np.ndarray:
+    """Expected Improvement acquisition function."""
+    from scipy.stats import norm
+    mu, sigma = gp.predict(X_candidates, return_std=True)
+    sigma = np.maximum(sigma, 1e-9)
+    z = (mu - y_best - xi) / sigma
+    return (mu - y_best - xi) * norm.cdf(z) + sigma * norm.pdf(z)
+
+
+def bayesian_search_weights(
+    df_train: pd.DataFrame,
+    n_calls: int = 80,
+    n_initial: int = 15,
+    objective: str = "blended",
+    lambda_mono: float = 0.5,
+    lambda_cagr: float = 0.0,
+    beta: float = 10.0,
+    horizon_days: int = 21,
+    seed: int = 42,
+    output_dir: str = "reports/regression",
+) -> list[tuple[np.ndarray, float]]:
+    """Bayesian (GP) optimization on the simplex via softmax reparameterization.
+
+    Instead of many SLSQP restarts, fits a Gaussian Process surrogate to
+    observed (z -> w -> J(w)) pairs and uses Expected Improvement to pick
+    the next point to evaluate. Much more sample-efficient for noisy,
+    rank-based objectives (IC, monotonicity).
+
+    Parameters
+    ----------
+    n_calls : total evaluations (initial random + GP-guided). ~60-100 is typical.
+    n_initial : random Dirichlet points before GP takes over.
+    objective : 'blended' (IC + lam*Mono + lam*SoftRet), 'ic', 'mono', or 'top_ret'.
+    output_dir : directory for convergence CSV.
+    """
+    from sklearn.gaussian_process import GaussianProcessRegressor
+    from sklearn.gaussian_process.kernels import Matern, WhiteKernel, ConstantKernel
+
+    rng = np.random.default_rng(seed)
+    n = len(FACTORS)
+    groups = _precompute_groups(df_train) if lambda_cagr > 0 else []
+
+    log.info("=" * 80)
+    log.info("BAYESIAN GP OPTIMIZATION")
+    log.info("=" * 80)
+    log.info("  objective=%s  n_calls=%d  n_initial=%d  lambda_mono=%.2f  lambda_cagr=%.2f  beta=%.1f",
+             objective, n_calls, n_initial, lambda_mono, lambda_cagr, beta)
+
+    # ── Phase 1: random initial evaluations (Dirichlet on simplex) ────────
+    Z_observed: list[np.ndarray] = []  # unconstrained space
+    Y_observed: list[float] = []
+    W_observed: list[np.ndarray] = []  # simplex weights
+    convergence: list[dict] = []  # convergence tracking
+    best_J = -np.inf
+    best_w = None
+    best_at_random_end = -np.inf  # best J after random phase (baseline)
+
+    log.info("Phase 1: %d random initial evaluations ...", n_initial)
+    for i in range(n_initial):
+        w = rng.dirichlet(np.ones(n))
+        # Invert softmax: z = log(w) (up to additive constant)
+        z = np.log(np.clip(w, 1e-8, None))
+        z -= z.mean()  # center for numerical stability
+
+        J = _eval_objective_for_bayes(
+            df_train, w, groups, objective,
+            lambda_mono, lambda_cagr, beta, horizon_days,
+        )
+        Z_observed.append(z)
+        Y_observed.append(J)
+        W_observed.append(w)
+
+        if J > best_J:
+            best_J = J
+            best_w = w
+            log.info("  [init %2d/%d] new best J=%.4f  w=[%s]",
+                     i + 1, n_initial, J,
+                     ", ".join(f"{f[:4]}:{wv:.2f}" for f, wv in zip(FACTORS, w)))
+
+        convergence.append({"step": i + 1, "phase": "random", "J": round(J, 5),
+                            "best_so_far": round(best_J, 5)})
+
+    best_at_random_end = best_J
+
+    # ── Phase 2: GP-guided search ─────────────────────────────────────────
+    kernel = ConstantKernel(1.0) * Matern(length_scale=1.0, nu=2.5) + WhiteKernel(noise_level=0.01)
+
+    n_gp_iters = n_calls - n_initial
+    log.info("Phase 2: %d GP-guided evaluations ...", n_gp_iters)
+    pbar = tqdm(range(n_gp_iters), desc="Bayesian GP", unit="eval")
+
+    for i in pbar:
+        X = np.array(Z_observed)
+        Y = np.array(Y_observed)
+
+        # Fit GP
+        gp = GaussianProcessRegressor(
+            kernel=kernel, n_restarts_optimizer=3, alpha=1e-6,
+            normalize_y=True, random_state=seed + i,
+        )
+        gp.fit(X, Y)
+
+        # Generate candidate points and pick the one with highest EI
+        n_candidates = 2000
+        z_candidates = []
+        for _ in range(n_candidates):
+            w_cand = rng.dirichlet(np.ones(n))
+            z_cand = np.log(np.clip(w_cand, 1e-8, None))
+            z_cand -= z_cand.mean()
+            z_candidates.append(z_cand)
+        Z_cand = np.array(z_candidates)
+
+        ei = _expected_improvement(Z_cand, gp, y_best=best_J, xi=0.01)
+        best_idx = np.argmax(ei)
+        z_next = Z_cand[best_idx]
+        w_next = _softmax(z_next)
+
+        # Evaluate
+        J = _eval_objective_for_bayes(
+            df_train, w_next, groups, objective,
+            lambda_mono, lambda_cagr, beta, horizon_days,
+        )
+        Z_observed.append(z_next)
+        Y_observed.append(J)
+        W_observed.append(w_next)
+
+        if J > best_J:
+            best_J = J
+            best_w = w_next
+            log.info("  [GP %3d/%d] new best J=%.4f  w=[%s]  (EI=%.4f)",
+                     i + 1, n_gp_iters, J,
+                     ", ".join(f"{f[:4]}:{wv:.2f}" for f, wv in zip(FACTORS, w_next)),
+                     ei[best_idx])
+
+        convergence.append({"step": n_initial + i + 1, "phase": "gp",
+                            "J": round(J, 5), "best_so_far": round(best_J, 5)})
+        pbar.set_postfix(best=f"{best_J:.4f}", ei_max=f"{ei.max():.4f}")
+
+    # ── Convergence diagnostics ───────────────────────────────────────────
+    gp_improvement = best_J - best_at_random_end
+    log.info("CONVERGENCE: random_best=%.4f  final_best=%.4f  GP_improvement=%+.4f (%.1f%%)",
+             best_at_random_end, best_J, gp_improvement,
+             100 * gp_improvement / abs(best_at_random_end) if best_at_random_end != 0 else 0)
+    if gp_improvement <= 0:
+        log.warning("  GP phase did NOT improve over random — objective may be too flat or noisy.")
+
+    # Save convergence CSV for analysis
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        conv_df = pd.DataFrame(convergence)
+        conv_path = os.path.join(output_dir, "bayesian_convergence.csv")
+        conv_df.to_csv(conv_path, index=False)
+        log.info("  Convergence trace saved to %s", conv_path)
+    except Exception as e:
+        log.warning("  Could not save convergence CSV: %s", e)
+
+    # ── Deduplicate and sort ──────────────────────────────────────────────
+    results: list[tuple[np.ndarray, float]] = []
+    seen: set[tuple] = set()
+    for w, J in zip(W_observed, Y_observed):
+        key = tuple(np.round(w, 3))
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append((w, J))
+
+    results.sort(key=lambda t: t[1], reverse=True)
+    log.info("Bayesian GP complete: %d unique candidates from %d evaluations", len(results), n_calls)
+    if results:
+        log.info("  Top 3 by train J:")
+        for rank, (w, J) in enumerate(results[:3], 1):
+            log.info("    #%d  J=%.4f  w=[%s]",
+                     rank, J,
+                     ", ".join(f"{f[:4]}:{wv:.2f}" for f, wv in zip(FACTORS, w)))
+    return results
+
+
+def run_walk_forward(
+    df: pd.DataFrame,
+    args: argparse.Namespace,
+    common_bayes_kw: dict,
+    common_slsqp_kw: dict,
+) -> None:
+    """Run rolling Walk-Forward Optimization (WFO) over time."""
+    # Ensure date is a DatetimeIndex
+    df = df.copy()
+    if not pd.api.types.is_datetime64_any_dtype(df["date"]):
+        df["date"] = pd.to_datetime(df["date"])
+
+    # Find all unique rebalance dates and sort them
+    dates = pd.Series(df["date"].unique()).sort_values().reset_index(drop=True)
+    
+    if len(dates) == 0:
+        log.error("No dates available for WFO.")
+        return
+        
+    # We will step month by month. To do this robustly, we use YearMonth periods
+    df["ym"] = df["date"].dt.to_period("M")
+    months = pd.Series(df["ym"].unique()).sort_values().reset_index(drop=True)
+    
+    if len(months) <= args.wf_lookback:
+        log.error("Not enough months for WFO lookback. Have %d, need >%d", len(months), args.wf_lookback)
+        return
+        
+    log.info("=" * 80)
+    log.info("WALK-FORWARD OPTIMIZATION (WFO)")
+    log.info("=" * 80)
+    log.info("  Lookback: %d months  Step: %d month(s)  Smoothing: %.2f", args.wf_lookback, args.wf_step, args.wf_smoothing)
+    
+    results = []
+    prev_w = None
+    
+    for i in range(args.wf_lookback, len(months), args.wf_step):
+        train_start = months.iloc[i - args.wf_lookback]
+        train_end = months.iloc[i - 1]
+        
+        test_start = months.iloc[i]
+        test_end = months.iloc[min(i + args.wf_step - 1, len(months) - 1)]
+        
+        train_mask = (df["ym"] >= train_start) & (df["ym"] <= train_end)
+        test_mask = (df["ym"] >= test_start) & (df["ym"] <= test_end)
+        
+        train_df = df[train_mask].copy()
+        test_df = df[test_mask].copy()
+        
+        log.info("-" * 80)
+        log.info("WFO Fold: Train [%s .. %s] (rows=%d) -> Test [%s .. %s] (rows=%d)", 
+                 train_start, train_end, len(train_df), test_start, test_end, len(test_df))
+                 
+        if len(train_df) < 100:
+            log.warning("Not enough train data, skipping fold.")
+            continue
+            
+        if args.method == "bayesian":
+            cands = bayesian_search_weights(train_df, **common_bayes_kw)
+        else:
+            cands = search_weights(train_df, **common_slsqp_kw)
+            
+        if not cands:
+            log.warning("No candidates found, skipping fold.")
+            continue
+            
+        w_best, j_best = cands[0]
+        
+        # Apply smoothing
+        if prev_w is not None and args.wf_smoothing > 0:
+            w_smoothed = args.wf_smoothing * prev_w + (1.0 - args.wf_smoothing) * w_best
+            w_smoothed = w_smoothed / w_smoothed.sum()  # Re-normalize
+        else:
+            w_smoothed = w_best
+            
+        prev_w = w_smoothed
+        
+        # Evaluate on test
+        if len(test_df) > 0:
+            m_te = _evaluate(test_df, w_smoothed, top_pct=args.top_pct, horizon_days=args.horizon_days, beta=args.beta)
+        else:
+            m_te = {"ic": 0.0, "mono": 0.0, "q5q1": 0.0, "top_ret": 0.0}
+            
+        row = {
+            "test_start": str(test_start),
+            "test_end": str(test_end),
+            **{f"w_{f}": round(float(w_smoothed[k]), 4) for k, f in enumerate(FACTORS)},
+            "IC_test": round(m_te["ic"], 4),
+            "Mono_test": round(m_te["mono"], 3),
+            "TopRet_test_pct": round(100 * m_te["top_ret"], 2),
+        }
+        results.append(row)
+        
+        w_str = ", ".join(f"{f[:4]}:{w_smoothed[k]:.2f}" for k, f in enumerate(FACTORS))
+        log.info("  -> w=[%s]  Test IC=%+.4f  Mono=%+.3f  TopRet=%+.1f%%",
+                 w_str, m_te["ic"], m_te["mono"], 100 * m_te["top_ret"])
+                 
+    out_df = pd.DataFrame(results)
+    csv_path = os.path.join(args.output_dir, "walk_forward_regression.csv")
+    out_df.to_csv(csv_path, index=False)
+    log.info("Saved WFO results to %s", csv_path)
+    
+    print("\n" + "=" * 100)
+    print("WALK-FORWARD OPTIMIZATION SUMMARY")
+    print("=" * 100)
+    print(out_df.to_string(index=False))
+    print("-" * 100)
+    print(f"Mean Test IC:     {out_df['IC_test'].mean():+.4f}")
+    print(f"Mean Test Mono:   {out_df['Mono_test'].mean():+.3f}")
+    print(f"Mean Test TopRet: {out_df['TopRet_test_pct'].mean():+.2f}%")
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 def main() -> None:
     ap = argparse.ArgumentParser(description="Factor-regression weight optimizer with train/val/test splits.")
@@ -449,13 +784,17 @@ def main() -> None:
                     help="Forward-return horizon in trading days (default 21 ~ 1 month).")
     ap.add_argument("--freq", default="ME",
                     help="Rebalance frequency for rows. ME=month-end, W-FRI=Friday-weekly.")
+    ap.add_argument("--method", choices=["slsqp", "bayesian", "compare"], default="slsqp",
+                    help="Optimization method. 'slsqp' (default): multi-start SLSQP. "
+                         "'bayesian': Gaussian Process BO with Expected Improvement — "
+                         "more sample-efficient for noisy rank-based objectives.")
     ap.add_argument("--n-starts", type=int, default=200,
                     help="Random Dirichlet restarts for SLSQP.")
     ap.add_argument("--lambda-mono", type=float, default=0.5,
                     help="Weight of monotonicity in objective.")
-    ap.add_argument("--lambda-cagr", type=float, default=1.0,
+    ap.add_argument("--lambda-cagr", type=float, default=0.0,
                     help="Weight of softmax-basket annualized return in objective "
-                         "(set 0 to disable; default 1.0). Differentiable surrogate "
+                         "(set 0 to disable; default 0.0). Differentiable surrogate "
                          "for top-K basket CAGR; SLSQP can actually climb its gradient.")
     ap.add_argument("--beta", type=float, default=10.0,
                     help="Softmax sharpness for basket return surrogate. Higher = more "
@@ -466,6 +805,31 @@ def main() -> None:
                          "AnnRet metric (default 0.2 = top quintile). This is the basket "
                          "you would actually trade; it does NOT enter the SLSQP objective.")
     ap.add_argument("--top-k", type=int, default=20)
+    ap.add_argument("--factors", default=None,
+                    help="Comma-separated list of active factors to optimize. "
+                         "Default: all 5 (technical,fundamental,momentum,quality,earnings_drift). "
+                         "Example: --factors technical,momentum,fundamental")
+    # ── Bayesian-specific args ────────────────────────────────────────────────
+    ap.add_argument("--bayes-n-calls", type=int, default=80,
+                    help="Total evaluations for Bayesian BO (initial + GP-guided). Default 80.")
+    ap.add_argument("--bayes-n-initial", type=int, default=15,
+                    help="Random Dirichlet evaluations before GP takes over. Default 15.")
+    ap.add_argument("--bayes-objective", choices=["blended", "ic", "mono", "top_ret"],
+                    default="blended",
+                    help="Objective for Bayesian BO. 'blended' = IC + λ·Mono + λ·SoftRet "
+                         "(same as SLSQP). 'ic' = maximize IC only. 'mono' = maximize "
+                         "monotonicity only. 'top_ret' = maximize top-quintile basket return.")
+                         
+    # ── Walk-Forward args ─────────────────────────────────────────────────────
+    ap.add_argument("--walk-forward", action="store_true",
+                    help="Run rolling Walk-Forward Optimization (WFO) over time instead of static splits.")
+    ap.add_argument("--wf-lookback", type=int, default=36,
+                    help="Lookback window in months for WFO train period (default 36).")
+    ap.add_argument("--wf-step", type=int, default=1,
+                    help="Step size in months for WFO test period (default 1).")
+    ap.add_argument("--wf-smoothing", type=float, default=0.0,
+                    help="Weight smoothing factor. 0.0=no smoothing, 0.7=70%% old weight + 30%% new weight.")
+
     ap.add_argument("--cache-matrix", default=None,
                     help="Parquet path for the (stock x date) factor matrix. "
                          "Default: cache/factor_matrix_<universe>.parquet (universe-scoped to avoid "
@@ -487,6 +851,20 @@ def main() -> None:
     ap.add_argument("--max-extension-pct", type=float, default=40.0,
                     help="Drop rows extended > this %% above 200DMA (default 40, matches engine).")
     args = ap.parse_args()
+
+    # ── Override active factors if --factors is specified ──────────────────────
+    global FACTORS
+    ALL_FACTORS = ["technical", "fundamental", "momentum", "quality", "earnings_drift"]
+    if args.factors:
+        selected = [f.strip() for f in args.factors.split(",")]
+        invalid = [f for f in selected if f not in ALL_FACTORS]
+        if invalid:
+            log.error("Unknown factors: %s. Valid: %s", invalid, ALL_FACTORS)
+            return
+        FACTORS = selected
+        log.info("Active factors overridden: %s", FACTORS)
+    else:
+        FACTORS = list(ALL_FACTORS)
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -553,6 +931,24 @@ def main() -> None:
     else:
         log.info("No entry filters applied (use --apply-filters to gate on RS/200DMA/extension).")
 
+    _common_bayes_kw = dict(
+        n_calls=args.bayes_n_calls, n_initial=args.bayes_n_initial,
+        objective=args.bayes_objective, lambda_mono=args.lambda_mono,
+        lambda_cagr=args.lambda_cagr, beta=args.beta,
+        horizon_days=args.horizon_days, output_dir=args.output_dir,
+    )
+    _common_slsqp_kw = dict(
+        n_starts=args.n_starts, lambda_mono=args.lambda_mono,
+        lambda_cagr=args.lambda_cagr, beta=args.beta,
+        horizon_days=args.horizon_days,
+    )
+
+    if args.walk_forward:
+        if args.test_end:
+            df_all = df_all[df_all["date"] <= args.test_end].copy()
+        run_walk_forward(df_all, args, _common_bayes_kw, _common_slsqp_kw)
+        return
+
     train = df_all[(df_all["date"] >= args.train_start) & (df_all["date"] <= args.train_end)].copy()
     val   = df_all[(df_all["date"] >= args.val_start)   & (df_all["date"] <= args.val_end)].copy()
     test  = df_all[(df_all["date"] >= args.test_start)  & (df_all["date"] <= args.test_end)].copy()
@@ -576,14 +972,44 @@ def main() -> None:
         log.warning("One split has <100 rows. Results will be noisy.")
 
     # ── Fit on train ──────────────────────────────────────────────────────────
-    candidates = search_weights(
-        train,
-        n_starts=args.n_starts,
-        lambda_mono=args.lambda_mono,
-        lambda_cagr=args.lambda_cagr,
-        beta=args.beta,
-        horizon_days=args.horizon_days,
-    )
+    if args.method == "compare":
+        # ── HEAD-TO-HEAD: run both methods, compare on val/test ───────────
+        log.info("COMPARE MODE: running both SLSQP and Bayesian ...")
+        cand_slsqp = search_weights(train, **_common_slsqp_kw)
+        cand_bayes = bayesian_search_weights(train, **_common_bayes_kw)
+
+        print("\n" + "=" * 130)
+        print("HEAD-TO-HEAD COMPARISON: SLSQP vs BAYESIAN")
+        print("=" * 130)
+        header = f"  {'Method':<10} {'Weights':>50}  {'IC_tr':>7} {'IC_va':>7} {'IC_te':>7}  {'Mono_tr':>7} {'Mono_va':>7} {'Mono_te':>7}  {'TopRet_va':>10} {'TopRet_te':>10}  {'gap':>6}"
+        print(header)
+        print("-" * 130)
+
+        for label, cands in [("SLSQP", cand_slsqp), ("Bayesian", cand_bayes)]:
+            if not cands:
+                print(f"  {label:<10}  NO CANDIDATES")
+                continue
+            w_best, j_best = cands[0]
+            m_tr = _evaluate(train, w_best, top_pct=args.top_pct, horizon_days=args.horizon_days, beta=args.beta)
+            m_va = _evaluate(val,   w_best, top_pct=args.top_pct, horizon_days=args.horizon_days, beta=args.beta)
+            m_te = _evaluate(test,  w_best, top_pct=args.top_pct, horizon_days=args.horizon_days, beta=args.beta)
+            gap = m_tr["ic"] - m_va["ic"]
+            w_str = ", ".join(f"{f[:4]}:{wv:.2f}" for f, wv in zip(FACTORS, w_best))
+            print(f"  {label:<10} {w_str:>50}  {m_tr['ic']:>+7.4f} {m_va['ic']:>+7.4f} {m_te['ic']:>+7.4f}"
+                  f"  {m_tr['mono']:>+7.3f} {m_va['mono']:>+7.3f} {m_te['mono']:>+7.3f}"
+                  f"  {100*m_va['top_ret']:>+10.2f} {100*m_te['top_ret']:>+10.2f}  {gap:>+6.3f}")
+        print("=" * 130)
+        print("\nUse the method whose VALIDATION metrics are stronger (IC_va, Mono_va, TopRet_va).")
+        print("Test metrics are for honest OOS confirmation only — do NOT pick based on test.")
+        print()
+
+        # Use Bayesian as the primary candidate set for the rest of the report
+        candidates = cand_bayes if cand_bayes else cand_slsqp
+    elif args.method == "bayesian":
+        candidates = bayesian_search_weights(train, **_common_bayes_kw)
+    else:
+        candidates = search_weights(train, **_common_slsqp_kw)
+
     if not candidates:
         log.error("No candidates produced. Check data / objective.")
         return
@@ -651,7 +1077,12 @@ def main() -> None:
     print("\n" + "=" * 130)
     print(f"FACTOR REGRESSION — top {K} candidates  (sorted by val_consistent: IC_val + 0.05·Mono_val + 0.20·TopRet_val − 0.5·|train→val IC gap|)")
     print(f"  splits: train {args.train_start}..{args.train_end} | val {args.val_start}..{args.val_end} | test {args.test_start}..{args.test_end}")
-    print(f"  horizon={args.horizon_days}d  freq={args.freq}  lambda_mono={args.lambda_mono}  lambda_cagr={args.lambda_cagr}  beta={args.beta}  top_pct={args.top_pct}  n_starts={args.n_starts}")
+    method_info = f"method={args.method}"
+    if args.method in ("bayesian", "compare"):
+        method_info += f"  bayes_obj={args.bayes_objective}  n_calls={args.bayes_n_calls}"
+    else:
+        method_info += f"  n_starts={args.n_starts}"
+    print(f"  horizon={args.horizon_days}d  freq={args.freq}  lambda_mono={args.lambda_mono}  lambda_cagr={args.lambda_cagr}  beta={args.beta}  top_pct={args.top_pct}  {method_info}")
     print("=" * 130)
     cols = ["rank_by_val_consistent"] + [f"w_{f}" for f in FACTORS] + [
         "IC_train", "IC_val", "IC_test",
@@ -713,11 +1144,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
 

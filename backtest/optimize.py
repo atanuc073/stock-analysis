@@ -1,3 +1,4 @@
+
 """Walk-forward weight optimizer for the composite score.
 
 Searches for SCORE_WEIGHTS that maximize a chosen objective (Sharpe,
@@ -85,6 +86,41 @@ def _resolve_universe(name: str) -> list[str]:
             return nse_all_tickers()
         except Exception as e:
             log.warning("nse_all unavailable (%s); fallback to watchlist", e)
+            return WATCHLIST
+    if n == "russell1000":
+        try:
+            from data_sources.universe import russell1000_tickers
+            return russell1000_tickers()
+        except Exception as e:
+            log.warning("russell1000 unavailable (%s); fallback to watchlist", e)
+            return WATCHLIST_US or WATCHLIST
+    if n == "russell2000":
+        try:
+            from data_sources.universe import russell2000_tickers
+            return russell2000_tickers()
+        except Exception as e:
+            log.warning("russell2000 unavailable (%s); fallback to watchlist", e)
+            return WATCHLIST_US or WATCHLIST
+    if n == "sp500":
+        try:
+            from data_sources.universe import sp500_tickers
+            return sp500_tickers()
+        except Exception as e:
+            log.warning("sp500 unavailable (%s); fallback to watchlist", e)
+            return WATCHLIST_US or WATCHLIST
+    if n == "sp400":
+        try:
+            from data_sources.universe import sp400_tickers
+            return sp400_tickers()
+        except Exception as e:
+            log.warning("sp400 unavailable (%s); fallback to watchlist", e)
+            return WATCHLIST_US or WATCHLIST
+    if n == "broad":
+        try:
+            from data_sources.universe import broad_universe
+            return broad_universe()
+        except Exception as e:
+            log.warning("broad universe unavailable (%s); fallback to watchlist", e)
             return WATCHLIST
     return [s.strip() for s in name.split(",") if s.strip()]
 

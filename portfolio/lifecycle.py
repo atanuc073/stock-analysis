@@ -10,12 +10,12 @@ from .models import Position, TierLevel, ExitSignal, ExitType, PositionStatus
 # ── Configuration (overridable via constructor) ──────────────────────────────
 DEFAULT_TIERS = (
     # (pct_gain, sell_fraction, new_stop_pct_relative_to_entry)
-    (0.22, 0.15, 0.05),    # T1 — sell only 15%, raise stop to +5% (not BE)
-    (0.50, 0.20, 0.30),    # T2 — sell only 20%, lock +30%
+    (0.22, 0.15, 0.05),    # T1 — sell 15%, raise stop to +5%
+    (0.40, 0.33, 0.20),    # T2 — sell 33%, lock +20%
 )
-DEFAULT_ATR_STOP_MULT = 3.0
-DEFAULT_HARD_STOP_PCT = 0.18         # cap per-position loss at 18% (give trades room)
-DEFAULT_TRAILING_PCT = 0.18          # tighter trail: 18% off peak (keeps more profit)
+DEFAULT_ATR_STOP_MULT = 4.0
+DEFAULT_HARD_STOP_PCT = 0.22         # cap per-position loss at 22% (give trades room)
+DEFAULT_TRAILING_PCT = 0.22          # wider trail: 22% off peak (prevents shakeouts)
 DEFAULT_TIME_STOP_DAYS = 365
 DEFAULT_TIME_STOP_BAND = (-0.05, 0.10)  # if return between -5% and +10% at time-stop, exit
 DEFAULT_THESIS_BREAK_SCORE = 50.0
