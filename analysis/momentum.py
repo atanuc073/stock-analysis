@@ -12,12 +12,21 @@ import pandas as pd
 
 
 def compute(df: pd.DataFrame) -> dict:
-    if df.empty or len(df) < 30:
+    if df.empty:
         return {"score": 50.0, "signals": []}
-    close = df["Close"]
+    close = df["Close"].dropna()
+    if len(close) < 30:
+        return {"score": 50.0, "signals": []}
+        
+    n_252 = min(252, len(close))
+    n_126 = min(126, len(close))
+    n_63 = min(63, len(close))
+    n_21 = min(21, len(close))
+    n_5 = min(5, len(close))
+
     ret = lambda n: (close.iloc[-1] / close.iloc[-n] - 1) * 100 if len(close) >= n else None
     r1 = ret(2)  # 1-day change uses prior close (index -2)
-    r5 = ret(5); r21 = ret(21); r63 = ret(63); r126 = ret(126); r252 = ret(252)
+    r5 = ret(n_5); r21 = ret(n_21); r63 = ret(n_63); r126 = ret(n_126); r252 = ret(n_252)
 
     # 12-1 momentum: 12M return minus 1M return → long-term strength + recent pause
     mom_12_1 = (r252 - r21) if (r252 is not None and r21 is not None) else None
