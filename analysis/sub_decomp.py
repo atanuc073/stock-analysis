@@ -300,20 +300,93 @@ def load_wfo_weight_schedule(path: str | Path | None = None) -> pd.DataFrame | N
     return wdf
 
 
+# ── Live-mode blended-weights configuration ─────────────────────────────────
+# When ``asof`` is None (live trading), a single fold's weights are too noisy
+# (the latest fold can be ~0.40 L1 away from the long-run mean — see the
+# May-2026 stability audit). We use a shrinkage blend instead:
+#
+#   w_live = α·mean(last N folds) + β·mean(all folds) + γ·uniform(1/K)
+#
+# Rationale per term:
+#   * α·recent  : tracks genuine regime drift (most recent OOS evidence)
+#   * β·long-run: anchors to long-run signal, dampens fold-to-fold noise
+#   * γ·uniform : James-Stein-style insurance against single-fold spikes
+#
+# Empirically (34-fold Bayesian WFO, 2023-01..2025-10):
+#   * latest_fold L1 vs mean_all = 0.40 (high variance, prone to overfit)
+#   * blend       L1 vs mean_all = 0.18 (sensible regime tilt, stable core)
+LIVE_BLEND_RECENT_N: int = 6      # how many recent folds to average
+LIVE_BLEND_ALPHA: float = 0.50    # weight on recent-fold mean
+LIVE_BLEND_BETA: float = 0.30     # weight on all-fold mean
+LIVE_BLEND_GAMMA: float = 0.20    # weight on uniform 1/K shrinkage prior
+
+
+def _blend_live_weights(
+    schedule: pd.DataFrame,
+    fallback: dict[str, float],
+    *,
+    recent_n: int = LIVE_BLEND_RECENT_N,
+    alpha: float = LIVE_BLEND_ALPHA,
+    beta: float = LIVE_BLEND_BETA,
+    gamma: float = LIVE_BLEND_GAMMA,
+) -> dict[str, float]:
+    """Compute the shrinkage-blended live weights from the WFO schedule.
+
+    Pure helper: takes a non-empty schedule + fallback dict, returns a
+    normalized weight dict keyed by ``SUB_FACTORS``.
+    """
+    cols = [f for f in SUB_FACTORS if f in schedule.columns]
+    if not cols:
+        return dict(fallback)
+    # Row-normalize each fold so missing/extra mass doesn't bias the average.
+    sched = schedule[cols].copy()
+    row_sum = sched.sum(axis=1).replace(0.0, pd.NA)
+    sched = sched.div(row_sum, axis=0).dropna(how="all")
+    if sched.empty:
+        return dict(fallback)
+
+    recent_mean = sched.tail(max(recent_n, 1)).mean()
+    all_mean = sched.mean()
+    k = len(SUB_FACTORS)
+    uniform = pd.Series(1.0 / k, index=cols)
+
+    blended = alpha * recent_mean + beta * all_mean + gamma * uniform
+    out = dict(fallback)  # carry baked defaults for features absent from CSV
+    for f in cols:
+        v = blended.get(f)
+        if v is not None and pd.notna(v):
+            out[f] = float(v)
+    total = sum(out.values())
+    if total > 0:
+        out = {k_: v_ / total for k_, v_ in out.items()}
+    return out
+
+
 def get_weights_for_date(
     asof: pd.Timestamp | str | None = None,
     *,
     schedule: pd.DataFrame | None = None,
     fallback: dict[str, float] | None = None,
+    live_blend: bool = True,
 ) -> dict[str, float]:
     """Look up the WFO weights to use at ``asof`` date.
 
+    Default behaviour (``live_blend=True``) returns the shrinkage blend so
+    that **the backtest path is identical to the live path** — at any
+    historical date D the engine sees the same blending formula it will see
+    in production. Look-ahead safety is preserved by slicing the schedule
+    to ``[:asof]`` BEFORE blending so only folds whose ``test_start <=
+    asof`` participate.
+
     Resolution rule:
-      * Find the most recent schedule row whose month <= asof month
-        (i.e. "the last fold whose training data ends before asof").
-      * If no such row exists (asof is BEFORE the first fold), return the
-        ``fallback`` weights so historical backtests pre-2023 still work.
-      * If no schedule is available at all, return ``fallback``.
+      * ``asof=None`` (LIVE):
+          - ``live_blend=True``  → blend over the full schedule.
+          - ``live_blend=False`` → single most recent fold (legacy / A/B).
+      * ``asof=<date>`` (BACKTEST, look-ahead safe):
+          - ``live_blend=True``  → blend over folds with month <= asof.
+          - ``live_blend=False`` → single most recent eligible fold (legacy).
+          - If no fold is eligible (asof predates all folds) return ``fallback``.
+      * No schedule available at all → ``fallback``.
 
     ``fallback`` defaults to the baked-in ``SUB_SCORE_WEIGHTS``.
     """
@@ -323,15 +396,21 @@ def get_weights_for_date(
         schedule = load_wfo_weight_schedule()
     if schedule is None or schedule.empty:
         return fallback
+
+    # Slice schedule to look-ahead-safe window based on asof.
     if asof is None:
-        # Live mode: use most recent fold.
-        row = schedule.iloc[-1]
+        eligible = schedule
     else:
         ts = pd.Timestamp(asof).to_period("M").to_timestamp()
         eligible = schedule.loc[:ts]
         if eligible.empty:
             return fallback  # asof predates all folds
-        row = eligible.iloc[-1]
+
+    if live_blend:
+        return _blend_live_weights(eligible, fallback)
+
+    # Legacy single-fold path
+    row = eligible.iloc[-1]
     out = dict(fallback)  # start with fallback so missing features keep defaults
     for f in SUB_FACTORS:
         if f in row.index and pd.notna(row[f]):

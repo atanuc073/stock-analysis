@@ -117,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--rebalance-days", type=int, default=5,
                    help="Rebalance every N trading days (default 5 = weekly)")
     p.add_argument("--max-positions", type=int, default=12)
-    p.add_argument("--max-extension", type=float, default=999,
+    p.add_argument("--max-extension", type=float, default=30,
                    help="Max extension above 200DMA to buy (default 25.0). "
                         "Data shows fwd-30D turns negative above ~25%%.")
     p.add_argument("--max-from-52wh", type=float, default=0.0,
