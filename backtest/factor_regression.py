@@ -880,6 +880,21 @@ def main() -> None:
         log.info("Loading cached factor matrix from %s", args.cache_matrix)
         df_all = pd.read_parquet(args.cache_matrix)
         df_all["date"] = pd.to_datetime(df_all["date"])
+        
+        # Check if all required FACTORS are present in df_all
+        missing_factors = [f for f in FACTORS if f not in df_all.columns]
+        if missing_factors:
+            log.warning("=" * 80)
+            log.warning("WARNING: Loaded cached factor matrix is missing requested factors: %s", missing_factors)
+            log.warning("To include these factors, please re-run with the '--rebuild-matrix' flag.")
+            log.warning("=" * 80)
+            
+            # Automatically adjust FACTORS to only those present in the cache
+            FACTORS = [f for f in FACTORS if f in df_all.columns]
+            if not FACTORS:
+                log.error("None of the requested factors are present in the cached matrix. Please rebuild with --rebuild-matrix.")
+                return
+            log.info("Continuing with available factors in cache: %s", FACTORS)
     else:
         symbols = _resolve_universe(args.universe)
         if args.sample_size and args.sample_size < len(symbols):

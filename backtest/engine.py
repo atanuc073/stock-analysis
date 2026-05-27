@@ -269,14 +269,16 @@ class BacktestEngine:
                     row = self.dynamic_weights_df[self.dynamic_weights_df["test_start"] == month_key]
                     if not row.empty:
                         row_data = row.iloc[0]
+                        # Safely load w_technical if it exists in the CSV, otherwise default to 0.0
+                        w_t = float(row_data["w_technical"]) if "w_technical" in row_data else 0.0
                         w_q = float(row_data["w_quality"])
                         w_f = float(row_data["w_fundamental"])
                         w_m = float(row_data["w_momentum"])
                         w_ed = float(row_data["w_earnings_drift"])
-                        total = w_q + w_f + w_m + w_ed
+                        total = w_t + w_q + w_f + w_m + w_ed
                         if total > 0:
                             self.cfg.weights = {
-                                "technical": 0.0,
+                                "technical": w_t / total,
                                 "fundamental": w_f / total,
                                 "momentum": w_m / total,
                                 "quality": w_q / total,
@@ -286,8 +288,8 @@ class BacktestEngine:
                                 "forecast": 0.0,
                                 "valuation": 0.0,
                             }
-                            log.debug("Dynamic weights for %s: Q=%.2f%%, ED=%.2f%%, M=%.2f%%, F=%.2f%%",
-                                      month_key, (w_q/total)*100, (w_ed/total)*100, (w_m/total)*100, (w_f/total)*100)
+                            log.debug("Dynamic weights for %s: T=%.2f%%, Q=%.2f%%, ED=%.2f%%, M=%.2f%%, F=%.2f%%",
+                                      month_key, (w_t/total)*100, (w_q/total)*100, (w_ed/total)*100, (w_m/total)*100, (w_f/total)*100)
 
             # Update regime daily (internally respects frequency checks)
             self._refresh_regime(asof)

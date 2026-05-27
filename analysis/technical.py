@@ -202,8 +202,14 @@ def compute(df: pd.DataFrame) -> dict:
         score -= 5; signals.append(f"Extended ({ext_20:.1f}% > SMA20)")
 
     # 4. Extension / Base scoring
+    # NOTE: "at 52w high" is NOT a bug per se — strong trends sit at highs for
+    # months. We softened the penalty (-12 → -5) and dropped the redundant
+    # upper-Bollinger penalty so the technical factor stops double-penalizing
+    # exactly the trend-following winners that momentum/RS reward. The hard
+    # parabolic-extension penalties (SMA20 +10/15/20%) above still bite real
+    # blow-offs without clobbering normal trend leadership.
     if extended_at_high:
-        score -= 12; signals.append(f"⚠️ Extended {pct_from_52w_high:+.1f}% from 52w high")
+        score -= 5; signals.append(f"Extended {pct_from_52w_high:+.1f}% from 52w high")
     elif in_base and far_from_low:
         score += 10; signals.append(f"In base ({pct_from_52w_high:.1f}% off high)")
     elif deep_pullback and above_200:
@@ -214,8 +220,8 @@ def compute(df: pd.DataFrame) -> dict:
 
     if 0 <= bb_pct.iloc[last] <= 0.05:
         score += 4; signals.append("At lower Bollinger band")
-    if bb_pct.iloc[last] >= 0.95:
-        score -= 6; signals.append("At upper Bollinger band (extended)")
+    # Upper-Bollinger penalty intentionally removed: redundant with SMA20
+    # extension penalty above and biases technical factor against trend leaders.
 
     score = float(np.clip(score, 0, 100))
 
@@ -241,4 +247,3 @@ def compute(df: pd.DataFrame) -> dict:
         "inst_metrics": inst_metrics,
         "inst_score": inst_score,
     }
-

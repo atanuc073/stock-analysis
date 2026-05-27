@@ -28,10 +28,21 @@ def compute(df: pd.DataFrame) -> dict:
     r1 = ret(2)  # 1-day change uses prior close (index -2)
     r5 = ret(n_5); r21 = ret(n_21); r63 = ret(n_63); r126 = ret(n_126); r252 = ret(n_252)
 
-    # 12-1 momentum: 12M return minus 1M return → long-term strength + recent pause
-    mom_12_1 = (r252 - r21) if (r252 is not None and r21 is not None) else None
+    # Academic 12-1 momentum (Jegadeesh-Titman): return from t-12mo to t-1mo.
+    # i.e. (close[t-21] / close[t-252]) - 1. NOT r252 - r21 (those are returns
+    # to t, which differ slightly and can flip cross-sectional rankings).
+    def _skip_ret(skip: int, lookback: int) -> float | None:
+        if len(close) < lookback or skip >= lookback:
+            return None
+        p_now = float(close.iloc[-skip - 1]) if skip > 0 else float(close.iloc[-1])
+        p_then = float(close.iloc[-lookback])
+        if p_then <= 0:
+            return None
+        return (p_now / p_then - 1.0) * 100.0
+
+    mom_12_1 = _skip_ret(skip=n_21, lookback=n_252) if (len(close) >= n_252 and n_21 < n_252) else None
     # 6-1 momentum (shorter-cycle equivalent for stocks without 252d history)
-    mom_6_1 = (r126 - r21) if (r126 is not None and r21 is not None) else None
+    mom_6_1 = _skip_ret(skip=n_21, lookback=n_126) if (len(close) >= n_126 and n_21 < n_126) else None
 
     score = 50.0
     signals = []
@@ -70,12 +81,12 @@ def compute(df: pd.DataFrame) -> dict:
         score -= 4
         signals.append(f"{r5:.1f}% last week (knife-catch risk)")
 
-    # Weighted RS Score (IBD / Minervini style)
-    # (0.4 * 12M) + (0.2 * 9M) + (0.2 * 6M) + (0.2 * 3M)
-    # This identifies stocks with high sustained strength.
+    # Weighted RS Score (IBD / Minervini-flavored, simplified to available windows)
+    # Weights: 0.4 * 12M + 0.4 * 6M + 0.2 * 3M  (sums to 1.0). The 6M leg acts as
+    # a substitute for the classic 9M/6M blend since we don't compute 9M separately.
     rs_val = 0.0
     if r252 is not None: rs_val += 0.4 * r252
-    if r126 is not None: rs_val += 0.4 * r126  # substitute for 9M/6M blend if needed
+    if r126 is not None: rs_val += 0.4 * r126
     if r63 is not None: rs_val += 0.2 * r63
     
     score = float(np.clip(score, 0, 100))

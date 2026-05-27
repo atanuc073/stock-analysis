@@ -112,12 +112,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="Initial capital (default: 1,000,000)")
     p.add_argument("--universe", default="watchlist",
                    help="watchlist | india | us | broad | RELIANCE.NS,TCS.NS,...")
-    p.add_argument("--threshold", type=float, default=70.0,
+    p.add_argument("--threshold", type=float, default=65.0,
                    help="Min composite score to buy (default 70)")
     p.add_argument("--rebalance-days", type=int, default=5,
                    help="Rebalance every N trading days (default 5 = weekly)")
     p.add_argument("--max-positions", type=int, default=12)
-    p.add_argument("--max-extension", type=float, default=25.0,
+    p.add_argument("--max-extension", type=float, default=999,
                    help="Max extension above 200DMA to buy (default 25.0). "
                         "Data shows fwd-30D turns negative above ~25%%.")
     p.add_argument("--max-from-52wh", type=float, default=0.0,
@@ -134,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="Bypass all regime-based cash floors to stay fully invested at all times.")
     p.add_argument("--max-sector-weight", type=float, default=0.30,
                    help="Max sector concentration weight (default 0.30)")
-    p.add_argument("--max-market-weight", type=float, default=0.70,
+    p.add_argument("--max-market-weight", type=float, default=0.99,
                    help="Max country concentration weight (default 0.70)")
     p.add_argument("--include-forecast", action="store_true",
                    help="Include forecast component (slower)")

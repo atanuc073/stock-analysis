@@ -62,6 +62,13 @@ def compute(info: dict) -> dict:
     div_yield = _safe_float(info.get("dividendYield"))
     market_cap = _safe_float(info.get("marketCap"))
 
+    # yfinance has historically been inconsistent: older versions return
+    # dividendYield as a decimal fraction (0.025 = 2.5%), newer versions return
+    # the percent number itself (2.5 = 2.5%). Normalize to a decimal fraction so
+    # downstream comparisons (e.g. > 0.03) behave the same regardless of source.
+    if div_yield is not None and div_yield > 1.0:
+        div_yield = div_yield / 100.0
+
     score = 50.0
     signals = []
 
