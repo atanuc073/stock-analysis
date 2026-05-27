@@ -82,6 +82,29 @@ log = logging.getLogger(__name__)
 # at any date >= row R's test_start is honest out-of-sample evaluation.
 WFO_SCHEDULE_PATH = Path(__file__).resolve().parents[1] / "reports" / "regression" / "sub" / "walk_forward_regression.csv"
 
+# Universe-specific WFO schedules. Optimal weights differ materially across
+# universes (Russell1000 leans fund_growth ~0.30, Nifty500 leans mom_rs +
+# tech_extension; L1 distance between their blends is 0.63). Use the right
+# schedule for the right universe.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+UNIVERSE_WFO_PATHS: dict[str, Path] = {
+    # India
+    "nifty500":  _REPO_ROOT / "reports" / "regression" / "sub" / "walk_forward_regression.csv",
+    "nse_all":   _REPO_ROOT / "reports" / "regression" / "sub" / "walk_forward_regression.csv",
+    "watchlist": _REPO_ROOT / "reports" / "regression" / "sub" / "walk_forward_regression.csv",
+    # US
+    "russell1000": _REPO_ROOT / "reports" / "regression" / "russell1000_sub" / "sub" / "walk_forward_regression.csv",
+    "russell2000": _REPO_ROOT / "reports" / "regression" / "russell1000_sub" / "sub" / "walk_forward_regression.csv",
+    "sp500":       _REPO_ROOT / "reports" / "regression" / "russell1000_sub" / "sub" / "walk_forward_regression.csv",
+}
+
+
+def resolve_wfo_path(universe: str | None) -> Path:
+    """Return the WFO schedule path for ``universe`` (None / unknown → default Nifty500)."""
+    if not universe:
+        return WFO_SCHEDULE_PATH
+    return UNIVERSE_WFO_PATHS.get(universe.lower(), WFO_SCHEDULE_PATH)
+
 # ── Feature definitions (canonical order) ─────────────────────────────────────
 SUB_FACTORS: list[str] = [
     "tech_trend", "tech_extension", "tech_volume",
@@ -260,25 +283,30 @@ def apply_sub_decomp(
 #   * The live screener uses the most recent fold's weights, automatically
 #     picking up new fits whenever the WFO is re-run.
 
-_SCHEDULE_CACHE: pd.DataFrame | None = None
-_SCHEDULE_MTIME: float = -1.0
+_SCHEDULE_CACHE: dict[Path, tuple[float, pd.DataFrame]] = {}
 
 
-def load_wfo_weight_schedule(path: str | Path | None = None) -> pd.DataFrame | None:
+def load_wfo_weight_schedule(
+    path: str | Path | None = None,
+    *,
+    universe: str | None = None,
+) -> pd.DataFrame | None:
     """Load the WFO out-of-sample weight schedule from CSV.
 
-    Returns a DataFrame indexed by month-start ``pd.Timestamp`` with one
-    column per ``SUB_FACTORS`` entry, or ``None`` if the file is missing.
-    Cached and auto-invalidated on file mtime change so re-runs of the WFO
-    are picked up without restarting the process.
+    Resolution: explicit ``path`` > ``universe`` lookup > default Nifty500 path.
+    Per-path cache (keyed by resolved path + mtime) so multiple universes
+    don't evict each other.
     """
-    global _SCHEDULE_CACHE, _SCHEDULE_MTIME
-    p = Path(path) if path is not None else WFO_SCHEDULE_PATH
+    if path is not None:
+        p = Path(path)
+    else:
+        p = resolve_wfo_path(universe)
     if not p.exists():
         return None
     mtime = p.stat().st_mtime
-    if _SCHEDULE_CACHE is not None and mtime == _SCHEDULE_MTIME:
-        return _SCHEDULE_CACHE
+    cached = _SCHEDULE_CACHE.get(p)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
     df = pd.read_csv(p)
     if "test_start" not in df.columns:
         log.warning("WFO schedule %s has no 'test_start' column; ignoring.", p)
@@ -290,11 +318,10 @@ def load_wfo_weight_schedule(path: str | Path | None = None) -> pd.DataFrame | N
     keep = [f"w_{f}" for f in SUB_FACTORS if f"w_{f}" in df.columns]
     if len(keep) != len(SUB_FACTORS):
         missing = [f for f in SUB_FACTORS if f"w_{f}" not in df.columns]
-        log.warning("WFO schedule missing weight columns for: %s. Falling back to baked defaults for those.", missing)
+        log.warning("WFO schedule %s missing weight columns for: %s. Falling back to baked defaults for those.", p, missing)
     wdf = df[keep].copy()
     wdf.columns = [c[2:] for c in wdf.columns]  # strip 'w_' prefix
-    _SCHEDULE_CACHE = wdf
-    _SCHEDULE_MTIME = mtime
+    _SCHEDULE_CACHE[p] = (mtime, wdf)
     log.info("Loaded WFO weight schedule: %d folds from %s to %s (%s)",
              len(wdf), wdf.index.min().strftime("%Y-%m"), wdf.index.max().strftime("%Y-%m"), p)
     return wdf
@@ -368,6 +395,7 @@ def get_weights_for_date(
     schedule: pd.DataFrame | None = None,
     fallback: dict[str, float] | None = None,
     live_blend: bool = True,
+    universe: str | None = None,
 ) -> dict[str, float]:
     """Look up the WFO weights to use at ``asof`` date.
 
@@ -377,6 +405,10 @@ def get_weights_for_date(
     in production. Look-ahead safety is preserved by slicing the schedule
     to ``[:asof]`` BEFORE blending so only folds whose ``test_start <=
     asof`` participate.
+
+    ``universe`` (e.g. "nifty500", "russell1000") routes to the right WFO CSV
+    (see ``UNIVERSE_WFO_PATHS``). Optimal weights differ materially across
+    universes; using the wrong file silently degrades the strategy.
 
     Resolution rule:
       * ``asof=None`` (LIVE):
@@ -393,7 +425,7 @@ def get_weights_for_date(
     if fallback is None:
         fallback = dict(SUB_SCORE_WEIGHTS)
     if schedule is None:
-        schedule = load_wfo_weight_schedule()
+        schedule = load_wfo_weight_schedule(universe=universe)
     if schedule is None or schedule.empty:
         return fallback
 

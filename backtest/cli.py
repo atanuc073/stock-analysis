@@ -117,9 +117,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--rebalance-days", type=int, default=5,
                    help="Rebalance every N trading days (default 5 = weekly)")
     p.add_argument("--max-positions", type=int, default=12)
-    p.add_argument("--max-extension", type=float, default=30,
-                   help="Max extension above 200DMA to buy (default 25.0). "
-                        "Data shows fwd-30D turns negative above ~25%%.")
+    p.add_argument("--max-extension", type=float, default=30.0,
+                   help="Max %% extension above 200DMA to buy (default 30.0). "
+                        "Backtest diagnostic shows the 30-40%% extension bucket "
+                        "has Avg_Fwd30 = -2.07%% (i.e. losing money on entry). "
+                        "Set 999 to disable; raise to 40+ to recover the late-cycle "
+                        "trend-following bucket at the cost of more drawdown.")
     p.add_argument("--max-from-52wh", type=float, default=0.0,
                    help="Require at least this %% pullback from 52w high "
                         "(default 0.0 = disabled; e.g. -10 forces >=10%% pullback).")
@@ -224,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
         base_position_weight=args.base_position_weight,
         ignore_cash_floor=args.ignore_cash_floor,
         require_uptrend_confirm=not args.no_uptrend_confirm,
+        universe=args.universe,
     )
 
     # Pre-load benchmarks (also used as regime input)

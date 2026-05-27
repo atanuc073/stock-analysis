@@ -122,6 +122,10 @@ class BacktestConfig:
     sip_day_of_month: int = 13
     uptrend_mode: bool = False                  # if True, use s.uptrend_score for entries
     warmup_days: int = 0                       # skip new entries for first N days (default 0)
+    # Universe label (e.g. "nifty500", "russell1000"). Routes to the right
+    # WFO weight schedule when sub_decomp is enabled. Leave blank to use the
+    # default Nifty500 schedule.
+    universe: str = ""
 
 
     @property
@@ -673,20 +677,32 @@ class BacktestEngine:
         except Exception as e:
             log.warning("RS percentile pass failed: %s", e)
 
-        # Sub-decomposition pass (12-feature model, May 2026).
-        # When config.USE_SUB_DECOMP is enabled, overwrite each candidate's
-        # adjusted_score with the weighted-sum-of-ranks composite. The sort
-        # below uses adjusted_score (or uptrend_score in uptrend_mode), so
-        # this changes the entry ranking without further plumbing. Bypassed
-        # when the engine is configured with custom `weights` so factor
-        # regression sweeps (which use 5-factor weights) keep their semantics.
+        # Sub-decomposition pass (12-feature WFO-trained blend). When
+        # USE_SUB_DECOMP is enabled this OVERWRITES adjusted_score with the
+        # 12-feature blended score so backtest scoring is identical to the
+        # live screener path in composite.py. Weights are blended per asof
+        # date (look-ahead safe) and routed to the right CSV via
+        # cfg.universe (e.g. "nifty500" → reports/regression/sub/...,
+        # "russell1000" → reports/regression/russell1000_sub/sub/...).
+        # Disable by setting env USE_SUB_DECOMP=0.
         try:
-            from config import USE_SUB_DECOMP
-            if USE_SUB_DECOMP and self.cfg.weights is None:
-                from analysis.sub_decomp import apply_sub_decomp
-                apply_sub_decomp(scores)
-        except Exception as e:
-            log.warning("sub_decomp pass failed: %s", e)
+            from config import USE_SUB_DECOMP  # type: ignore
+        except Exception:
+            USE_SUB_DECOMP = True
+        if USE_SUB_DECOMP and self.cfg.weights is None:
+            try:
+                from analysis.sub_decomp import apply_sub_decomp, get_weights_for_date
+                w_today = get_weights_for_date(asof, universe=self.cfg.universe or None)
+                # Score US and IN separately so cross-sectional ranks reflect
+                # the cohort each stock actually competes in.
+                us_scores = [s for s in scores if getattr(s, "market", "") == "US"]
+                in_scores = [s for s in scores if getattr(s, "market", "") != "US"]
+                if us_scores:
+                    apply_sub_decomp(us_scores, weights=w_today)
+                if in_scores:
+                    apply_sub_decomp(in_scores, weights=w_today)
+            except Exception as e:
+                log.warning("sub_decomp pass failed at %s: %s", asof.date(), e)
 
         # Optional hard filter: require RS percentile >= configured floor.
         # Default 0 = disabled; set min_rs_pct=70 to buy only leaders.
