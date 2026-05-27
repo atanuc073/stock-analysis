@@ -60,40 +60,11 @@ FACTORS = ["technical", "fundamental", "momentum", "quality", "earnings_drift"]
 N_QUANTILES = 5
 
 # ── Sub-factor decomposition (opt-in via --sub-decomp) ──────────────────────────
-# Instead of 5 pre-aggregated composite scores, expose 12 narrower features so the
-# optimizer can weight orthogonal sub-signals independently. Each extractor pulls
-# a raw scalar from the per-factor dicts returned by analysis/*.py; `direction`
-# normalizes sense so that AFTER per-date rank transform, higher = better. This
-# preserves the simplex constraint (w >= 0, sum(w) = 1) while letting the
-# optimizer assign zero weight to sub-signals that don't carry IC.
-#
-# Entries: name -> (lambda s -> raw_value_or_None, direction: +1 higher-better, -1 lower-better)
-SUB_FACTORS = [
-    "tech_trend", "tech_extension", "tech_volume",
-    "mom_12_1", "mom_3m", "mom_rs",
-    "qual_gpa", "qual_fcf", "qual_roa",
-    "fund_value", "fund_growth",
-    "earnings_drift",
-]
-_SUB_EXTRACTORS: dict = {
-    # technical
-    "tech_trend":     (lambda s: (s.technical or {}).get("pct_above_sma200"), +1),
-    "tech_extension": (lambda s: (s.technical or {}).get("pct_from_sma20"),   -1),  # less extension = better
-    "tech_volume":    (lambda s: (s.technical or {}).get("inst_score"),       +1),
-    # momentum
-    "mom_12_1":       (lambda s: (s.momentum  or {}).get("mom_12_1"),         +1),
-    "mom_3m":         (lambda s: (s.momentum  or {}).get("ret_3m"),           +1),
-    "mom_rs":         (lambda s: (s.momentum  or {}).get("rs_value"),         +1),
-    # quality
-    "qual_gpa":       (lambda s: (s.quality   or {}).get("gpa"),              +1),  # Novy-Marx
-    "qual_fcf":       (lambda s: (s.quality   or {}).get("fcf_yield"),        +1),
-    "qual_roa":       (lambda s: (s.quality   or {}).get("roa"),              +1),
-    # fundamental
-    "fund_value":     (lambda s: (s.fundamental or {}).get("pe"),             -1),  # lower P/E = better
-    "fund_growth":    (lambda s: (s.fundamental or {}).get("eps_growth"),     +1),
-    # earnings drift (keep as one)
-    "earnings_drift": (lambda s: (s.earnings_drift or {}).get("score"),       +1),
-}
+# The canonical definitions (SUB_FACTORS, sign-normalized extractors) live in
+# analysis/sub_decomp.py so the WFO optimizer, the live screener, and the
+# backtest engine all use the exact same feature set. We alias them here under
+# the module-private name expected by the existing build_factor_matrix logic.
+from analysis.sub_decomp import SUB_FACTORS, SUB_EXTRACTORS as _SUB_EXTRACTORS  # noqa: E402
 
 
 # ── Factor matrix construction ────────────────────────────────────────────────

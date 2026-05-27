@@ -673,6 +673,21 @@ class BacktestEngine:
         except Exception as e:
             log.warning("RS percentile pass failed: %s", e)
 
+        # Sub-decomposition pass (12-feature model, May 2026).
+        # When config.USE_SUB_DECOMP is enabled, overwrite each candidate's
+        # adjusted_score with the weighted-sum-of-ranks composite. The sort
+        # below uses adjusted_score (or uptrend_score in uptrend_mode), so
+        # this changes the entry ranking without further plumbing. Bypassed
+        # when the engine is configured with custom `weights` so factor
+        # regression sweeps (which use 5-factor weights) keep their semantics.
+        try:
+            from config import USE_SUB_DECOMP
+            if USE_SUB_DECOMP and self.cfg.weights is None:
+                from analysis.sub_decomp import apply_sub_decomp
+                apply_sub_decomp(scores)
+        except Exception as e:
+            log.warning("sub_decomp pass failed: %s", e)
+
         # Optional hard filter: require RS percentile >= configured floor.
         # Default 0 = disabled; set min_rs_pct=70 to buy only leaders.
         if self.cfg.min_rs_pct > 0:

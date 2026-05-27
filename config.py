@@ -95,7 +95,26 @@ SCORE_WEIGHTS = {
 assert abs(sum(SCORE_WEIGHTS.values()) - 1.0) < 1e-6, (
     f"SCORE_WEIGHTS must sum to 1.0, got {sum(SCORE_WEIGHTS.values())}"
 )
-# ── Technical thresholds ─────────────────────────────────────────────────────
+
+# ── 12-feature sub-decomposition (new May-2026 model) ────────────────────────
+# When enabled, both the live screener (analyze_batch) and the historical
+# backtester (engine.py) call analysis.sub_decomp.apply_sub_decomp() after
+# the existing cross-sectional pass. It overwrites `adjusted_score` with a
+# weighted sum of 12 cross-sectionally rank-transformed sub-features whose
+# weights were derived from a 34-fold walk-forward optimization.
+#
+# Why opt-in?
+#   * The new score is a weighted average of 0-100 percentile ranks, so the
+#     distribution is tighter than the legacy composite. Hard absolute
+#     thresholds (e.g. score >= 70) may rarely trigger — re-calibrate or
+#     switch to percentile filters when enabling.
+#   * The OOS Information Ratio is ~4x higher (0.28 vs 0.07) — see
+#     reports/regression/sub/walk_forward_regression.csv for evidence.
+#
+# Default: ON (set env var USE_SUB_DECOMP=0 to revert to the 5-composite path).
+USE_SUB_DECOMP = os.getenv("USE_SUB_DECOMP", "1").strip() not in ("0", "false", "False", "")
+
+# ── Technical thresholds ───────────────────────────────────────────────────────
 RSI_OVERSOLD = 35
 RSI_OVERBOUGHT = 70
 VOLUME_SPIKE_MULT = 1.8  # today's volume vs 20-day avg

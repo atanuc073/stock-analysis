@@ -168,6 +168,32 @@ def analyze_batch(tickers: Iterable[TickerData]) -> list[StockReport]:
     if in_reps:
         uptrend.apply_rs(in_reps, market_regime=regimes["IN"])
 
+    # 3b. Sub-decomposition pass (12-feature model, May 2026).
+    # When config.USE_SUB_DECOMP is enabled, overwrite each report's
+    # adjusted_score with a weighted sum of 12 cross-sectionally rank-
+    # transformed sub-features. The downstream renderer, sort logic and
+    # daily_runner all read adjusted_score, so this swap is sufficient.
+    # See analysis/sub_decomp.py for rationale and WFO evidence.
+    try:
+        from config import USE_SUB_DECOMP
+        if USE_SUB_DECOMP:
+            from analysis.sub_decomp import apply_sub_decomp
+            valid = [r for r in reports if (r.composite_score or 0) > 0]
+            # Rank US and IN separately so cross-sectional ranks reflect the
+            # universe a stock actually competes in. Mixing them would, e.g.,
+            # rank a US tech mega-cap's P/E against Indian mid-caps.
+            us_valid = [r for r in valid if r.market == "US"]
+            in_valid = [r for r in valid if r.market == "IN"]
+            if us_valid:
+                apply_sub_decomp(us_valid)
+            if in_valid:
+                apply_sub_decomp(in_valid)
+    except Exception as _e:
+        # Never let sub-decomp break the pipeline — fall back to the existing
+        # cross-sectional adjusted_score and log for diagnosis.
+        import logging as _logging
+        _logging.getLogger(__name__).warning("sub_decomp pass failed: %s", _e)
+
     # 4. Finalize verdicts
     for r in reports:
         if r.composite_score > 0:   # don't overwrite N/A errors
