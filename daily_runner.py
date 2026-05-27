@@ -187,7 +187,7 @@ def _is_stopped_recently(symbol: str, trades: list, days: int = 30) -> bool:
 
 
 # ── Main runner ──────────────────────────────────────────────────────────────
-def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshold: float = 70.0, use_regime: bool = True, use_extension_filter: bool = True) -> None:
+def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshold: float = 62.0, use_regime: bool = True, use_extension_filter: bool = True) -> None:
     log.info("=== Daily Run @ %s | mode=%s ===", datetime.now().isoformat(timespec="seconds"), mode)
 
     # 1) Build services
@@ -348,7 +348,7 @@ def run(mode: str = RUN_MODE, top_n: int = TOP_N, send_tg: bool = True, threshol
         if r.symbol.upper() in blacklist:
             log.info("Skipping %s — re-entry lock (stopped out recently)", r.symbol)
             continue
-        max_ext = 25.0 if use_extension_filter else 999.0
+        max_ext = 30.0 if use_extension_filter else 999.0
         ok, reason = _passes_entry_quality(r, max_extension_pct=max_ext)
         if not ok:
             rejected_quality.append(f"{r.symbol}: {reason}")
@@ -783,7 +783,7 @@ if __name__ == "__main__":
                    choices=["watchlist", "broad", "russell1000", "sp500", "nifty500", "nse_all", "niftytotal"],
                    default=RUN_MODE)
     p.add_argument("--top", type=int, default=TOP_N)
-    p.add_argument("--threshold", type=float, default=70.0, help="Min composite score (default 70)")
+    p.add_argument("--threshold", type=float, default=62.0, help="Min composite score (default 62)")
     p.add_argument("--no-telegram", action="store_true")
     p.add_argument("--no-regime", action="store_true", help="Bypass all regime-based checks and constraints.")
     p.add_argument("--no-extension-filter", action="store_true", help="Bypass all entry quality / 200DMA extension checks.")

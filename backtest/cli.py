@@ -112,8 +112,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="Initial capital (default: 1,000,000)")
     p.add_argument("--universe", default="watchlist",
                    help="watchlist | india | us | broad | RELIANCE.NS,TCS.NS,...")
-    p.add_argument("--threshold", type=float, default=65.0,
-                   help="Min composite score to buy (default 70)")
+    p.add_argument("--threshold", type=float, default=62.0,
+                   help="Min composite score to buy (default 62)")
     p.add_argument("--rebalance-days", type=int, default=5,
                    help="Rebalance every N trading days (default 5 = weekly)")
     p.add_argument("--max-positions", type=int, default=12)
