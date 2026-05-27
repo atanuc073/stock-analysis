@@ -85,4 +85,4 @@ python -m backtest.cli --start 2023-01-01 --end 2024-12-31 --universe us --thres
   --output-dir reports/optimize/random_20_sample_200
 
 
- python -m  backtest.factor_regression --walk-forward --method bayesian --wf-lookback 36 --wf-step 1 --wf-smoothing 0.7 --rebuild-matrix --universe nifty500 --bayes-n-calls 20 --bayes-n-initial 5
+ python -m  backtest.factor_regression --walk-forward --method bayesian --wf-lookback 36 --wf-step 1 --wf-smoothing 0.7 --rebuild-matrix --universe nifty500 --bayes-n-calls 80 --bayes-n-initial 20 --sub-decomp 

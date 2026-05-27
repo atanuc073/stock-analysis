@@ -5,22 +5,32 @@ the per-factor sub-scores (technical/fundamental/momentum/quality/earnings_drift
 and the forward N-day return. Then we directly maximize a smooth ranking
 objective:
 
-    J(w) = IC(F @ w, fwd_ret)  +  lambda * Monotonicity(F @ w, fwd_ret)
+    J(w) = IC(F @ w, fwd_ret)
+           + lambda_mono * Monotonicity(F @ w, fwd_ret)
+           + lambda_cagr * SoftmaxBasket_AnnRet(F @ w, fwd_ret; beta)
 
-via SLSQP on the simplex (w >= 0, sum(w) = 1), restarted from many random
-Dirichlet starts.
+Two optimizer backends are available (selected via --method):
+  * slsqp     : multi-start SLSQP on the simplex (w >= 0, sum(w) = 1) from
+                random Dirichlet starts. Fast, deterministic for a given seed.
+  * bayesian  : Gaussian-Process Bayesian Optimization on a softmax-
+                reparameterized simplex, using Expected Improvement. More
+                sample-efficient for noisy / rank-based objectives.
+  * compare   : run both and print a head-to-head report.
 
-Three-split (chronological, no shuffle):
-    Train: 2014-01-01 .. 2020-12-31
-    Val:   2021-01-01 .. 2023-12-31
-    Test:  2024-01-01 .. 2025-12-31
+Two evaluation modes:
+  * Static train/val/test split (default). CLI defaults:
+        Train: 2020-01-01 .. 2024-12-31
+        Val:   2025-01-01 .. 2025-06-30
+        Test:  2025-07-01 .. 2025-12-31
+    Fit on train, pick on val, touch test once for an honest OOS number.
+  * --walk-forward : rolling WFO with --wf-lookback months of train and
+    --wf-step months of test, with optional weight smoothing across folds.
 
-The point of the splits:
-  * fit on train (find candidates)
-  * score on val (pick best, detect train->val degradation = overfit)
-  * touch test once at the end for an honest OOS number
-
-Output: reports/regression/<run>/candidates.csv  (top-K with all metrics).
+Outputs (under --output-dir, default reports/regression/):
+  * candidates.csv             (top-K candidates sorted by val_consistent)
+  * candidates_by_train.csv    (same set re-sorted by train J)
+  * bayesian_convergence.csv   (per-eval J trace; Bayesian only)
+  * walk_forward_regression.csv (per-fold weights & test metrics; WFO only)
 
 These weight vectors are intended to be FED INTO `backtest.optimize` afterwards
 as candidates for full walk-forward validation. The regression is a *filter*,
@@ -31,7 +41,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -49,6 +58,42 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 
 FACTORS = ["technical", "fundamental", "momentum", "quality", "earnings_drift"]
 N_QUANTILES = 5
+
+# ── Sub-factor decomposition (opt-in via --sub-decomp) ──────────────────────────
+# Instead of 5 pre-aggregated composite scores, expose 12 narrower features so the
+# optimizer can weight orthogonal sub-signals independently. Each extractor pulls
+# a raw scalar from the per-factor dicts returned by analysis/*.py; `direction`
+# normalizes sense so that AFTER per-date rank transform, higher = better. This
+# preserves the simplex constraint (w >= 0, sum(w) = 1) while letting the
+# optimizer assign zero weight to sub-signals that don't carry IC.
+#
+# Entries: name -> (lambda s -> raw_value_or_None, direction: +1 higher-better, -1 lower-better)
+SUB_FACTORS = [
+    "tech_trend", "tech_extension", "tech_volume",
+    "mom_12_1", "mom_3m", "mom_rs",
+    "qual_gpa", "qual_fcf", "qual_roa",
+    "fund_value", "fund_growth",
+    "earnings_drift",
+]
+_SUB_EXTRACTORS: dict = {
+    # technical
+    "tech_trend":     (lambda s: (s.technical or {}).get("pct_above_sma200"), +1),
+    "tech_extension": (lambda s: (s.technical or {}).get("pct_from_sma20"),   -1),  # less extension = better
+    "tech_volume":    (lambda s: (s.technical or {}).get("inst_score"),       +1),
+    # momentum
+    "mom_12_1":       (lambda s: (s.momentum  or {}).get("mom_12_1"),         +1),
+    "mom_3m":         (lambda s: (s.momentum  or {}).get("ret_3m"),           +1),
+    "mom_rs":         (lambda s: (s.momentum  or {}).get("rs_value"),         +1),
+    # quality
+    "qual_gpa":       (lambda s: (s.quality   or {}).get("gpa"),              +1),  # Novy-Marx
+    "qual_fcf":       (lambda s: (s.quality   or {}).get("fcf_yield"),        +1),
+    "qual_roa":       (lambda s: (s.quality   or {}).get("roa"),              +1),
+    # fundamental
+    "fund_value":     (lambda s: (s.fundamental or {}).get("pe"),             -1),  # lower P/E = better
+    "fund_growth":    (lambda s: (s.fundamental or {}).get("eps_growth"),     +1),
+    # earnings drift (keep as one)
+    "earnings_drift": (lambda s: (s.earnings_drift or {}).get("score"),       +1),
+}
 
 
 # ── Factor matrix construction ────────────────────────────────────────────────
@@ -88,17 +133,27 @@ def build_factor_matrix(
     end: pd.Timestamp,
     horizon_days: int = 21,
     freq: str = "ME",
+    sub_decomp: bool = False,
 ) -> pd.DataFrame:
     """Build a (stock x date) factor matrix with forward returns.
 
-    One row per (symbol, rebalance-date). Columns: F1..F5 + fwd_ret + meta.
+    One row per (symbol, rebalance-date). Columns: factor cols + fwd_ret + meta.
     Uses score_at() with no live weights, so each factor sub-score is independent
     of SCORE_WEIGHTS.
+
+    Two modes:
+      * sub_decomp=False (default): 5 composite scores (technical, fundamental,
+        momentum, quality, earnings_drift), each already 0-100 from analysis/*.py.
+      * sub_decomp=True: 12 raw sub-features extracted via _SUB_EXTRACTORS, then
+        cross-sectionally rank-transformed per date to a clean 0-100 scale so the
+        optimizer's softmax basket and IC routines see comparable scales.
     """
     dates = _rebalance_dates(start, end, freq=freq)
     rows: list[dict] = []
 
-    log.info("Building factor matrix: %d dates x %d symbols (~%d evals, horizon=%dd, freq=%s)",
+    active = SUB_FACTORS if sub_decomp else FACTORS
+    log.info("Building factor matrix [%s]: %d dates x %d symbols (~%d evals, horizon=%dd, freq=%s)",
+             "sub-decomp" if sub_decomp else "composite",
              len(dates), len(data), len(dates) * len(data), horizon_days, freq)
 
     skip_score = 0
@@ -128,20 +183,45 @@ def build_factor_matrix(
                 "rs_pct": float((s.uptrend_data or {}).get("rs_pct", 0.0) or 0.0),
                 "pct_above_sma200": float(s.technical.get("pct_above_sma200", 0.0) or 0.0),
             }
-            for f in FACTORS:
-                d = getattr(s, f) or {}
-                row[f] = float(d.get("score") or 50.0)
+            if sub_decomp:
+                # Raw extraction; NaNs are filled by per-date rank transform later.
+                for name, (fn, direction) in _SUB_EXTRACTORS.items():
+                    try:
+                        v = fn(s)
+                        v = float(v) if v is not None else np.nan
+                    except Exception:
+                        v = np.nan
+                    if np.isfinite(v):
+                        row[name] = direction * v  # sign-normalize so higher=better
+                    else:
+                        row[name] = np.nan
+            else:
+                for f in FACTORS:
+                    d = getattr(s, f) or {}
+                    row[f] = float(d.get("score") or 50.0)
             rows.append(row)
         pbar.set_postfix(rows=len(rows), kept=len(rows) - n_before)
 
     df = pd.DataFrame(rows)
+
+    if sub_decomp and len(df):
+        # Per-date cross-sectional rank transform → 0-100 percentile. NaN rows
+        # get assigned to the median rank (50) so missing data is neutral, not
+        # extreme. This makes scales comparable across heterogeneous features
+        # (P/E, momentum %, GPA, etc.) and is what professional factor models do.
+        log.info("  Rank-transforming %d sub-features per date → 0-100 percentile (NaN → 50) ...", len(SUB_FACTORS))
+        for f in SUB_FACTORS:
+            ranked = df.groupby("date")[f].rank(pct=True, na_option="keep") * 100.0
+            df[f] = ranked.fillna(50.0)
+
     log.info("Factor matrix built: %d rows | %d unique symbols | %d unique dates | skipped: score=%d fwd_ret=%d",
              len(df), df["symbol"].nunique(), df["date"].nunique(), skip_score, skip_fwd)
     if len(df):
         log.info("  Factor score stats (mean ± std):")
-        for f in FACTORS:
-            log.info("    %-16s mean=%5.1f  std=%5.1f  min=%5.1f  max=%5.1f",
-                     f, df[f].mean(), df[f].std(), df[f].min(), df[f].max())
+        for f in active:
+            if f in df.columns:
+                log.info("    %-16s mean=%5.1f  std=%5.1f  min=%5.1f  max=%5.1f",
+                         f, df[f].mean(), df[f].std(), df[f].min(), df[f].max())
         log.info("  Forward return: mean=%.4f  std=%.4f  median=%.4f",
                  df["fwd_ret"].mean(), df["fwd_ret"].std(), df["fwd_ret"].median())
     return df
@@ -447,6 +527,7 @@ def _eval_objective_for_bayes(
     lambda_cagr: float,
     beta: float,
     horizon_days: int,
+    top_pct: float = 0.2,
 ) -> float:
     """Evaluate a single objective value for Bayesian optimization.
 
@@ -464,7 +545,7 @@ def _eval_objective_for_bayes(
         return mono
 
     if objective == "top_ret":
-        return _topk_basket_return(df, composite, top_pct=0.2, horizon_days=horizon_days)
+        return _topk_basket_return(df, composite, top_pct=top_pct, horizon_days=horizon_days)
 
     # Default: blended (same as SLSQP objective)
     soft_ret = 0.0
@@ -498,6 +579,8 @@ def bayesian_search_weights(
     horizon_days: int = 21,
     seed: int = 42,
     output_dir: str = "reports/regression",
+    top_pct: float = 0.2,
+    convergence_suffix: str = "",
 ) -> list[tuple[np.ndarray, float]]:
     """Bayesian (GP) optimization on the simplex via softmax reparameterization.
 
@@ -512,6 +595,9 @@ def bayesian_search_weights(
     n_initial : random Dirichlet points before GP takes over.
     objective : 'blended' (IC + lam*Mono + lam*SoftRet), 'ic', 'mono', or 'top_ret'.
     output_dir : directory for convergence CSV.
+    top_pct : top fraction used when objective='top_ret'.
+    convergence_suffix : appended to 'bayesian_convergence' filename so WFO
+        folds do not overwrite each other (e.g. '_fold03').
     """
     from sklearn.gaussian_process import GaussianProcessRegressor
     from sklearn.gaussian_process.kernels import Matern, WhiteKernel, ConstantKernel
@@ -545,6 +631,7 @@ def bayesian_search_weights(
         J = _eval_objective_for_bayes(
             df_train, w, groups, objective,
             lambda_mono, lambda_cagr, beta, horizon_days,
+            top_pct=top_pct,
         )
         Z_observed.append(z)
         Y_observed.append(J)
@@ -599,6 +686,7 @@ def bayesian_search_weights(
         J = _eval_objective_for_bayes(
             df_train, w_next, groups, objective,
             lambda_mono, lambda_cagr, beta, horizon_days,
+            top_pct=top_pct,
         )
         Z_observed.append(z_next)
         Y_observed.append(J)
@@ -628,7 +716,9 @@ def bayesian_search_weights(
     try:
         os.makedirs(output_dir, exist_ok=True)
         conv_df = pd.DataFrame(convergence)
-        conv_path = os.path.join(output_dir, "bayesian_convergence.csv")
+        conv_path = os.path.join(
+            output_dir, f"bayesian_convergence{convergence_suffix}.csv"
+        )
         conv_df.to_csv(conv_path, index=False)
         log.info("  Convergence trace saved to %s", conv_path)
     except Exception as e:
@@ -689,8 +779,10 @@ def run_walk_forward(
     
     results = []
     prev_w = None
-    
+    fold_idx = 0
+
     for i in range(args.wf_lookback, len(months), args.wf_step):
+        fold_idx += 1
         train_start = months.iloc[i - args.wf_lookback]
         train_end = months.iloc[i - 1]
         
@@ -704,15 +796,18 @@ def run_walk_forward(
         test_df = df[test_mask].copy()
         
         log.info("-" * 80)
-        log.info("WFO Fold: Train [%s .. %s] (rows=%d) -> Test [%s .. %s] (rows=%d)", 
-                 train_start, train_end, len(train_df), test_start, test_end, len(test_df))
-                 
+        log.info("WFO Fold %d: Train [%s .. %s] (rows=%d) -> Test [%s .. %s] (rows=%d)",
+                 fold_idx, train_start, train_end, len(train_df), test_start, test_end, len(test_df))
+
         if len(train_df) < 100:
             log.warning("Not enough train data, skipping fold.")
             continue
-            
+
         if args.method == "bayesian":
-            cands = bayesian_search_weights(train_df, **common_bayes_kw)
+            cands = bayesian_search_weights(
+                train_df, **common_bayes_kw,
+                convergence_suffix=f"_fold{fold_idx:03d}",
+            )
         else:
             cands = search_weights(train_df, **common_slsqp_kw)
             
@@ -850,12 +945,32 @@ def main() -> None:
                     help="Drop rows where price is below 200DMA (default on).")
     ap.add_argument("--max-extension-pct", type=float, default=40.0,
                     help="Drop rows extended > this %% above 200DMA (default 40, matches engine).")
+
+    # ── Sub-decomposition (opt-in, additive: leaves 5-factor path untouched) ────
+    ap.add_argument("--sub-decomp", action="store_true",
+                    help="Use 12 raw sub-features (3 technical + 3 momentum + 3 quality + 2 "
+                         "fundamental + 1 earnings_drift) instead of the 5 composite scores. "
+                         "Features are cross-sectionally rank-transformed per date to 0-100 so "
+                         "heterogeneous raw scales (P/E, %% returns, GPA, ...) don't break the "
+                         "softmax basket. Output goes to <output-dir>/sub/ and uses a separate "
+                         "cache file so the 5-factor cache is untouched. Revert by dropping the flag.")
     args = ap.parse_args()
 
     # ── Override active factors if --factors is specified ──────────────────────
     global FACTORS
     ALL_FACTORS = ["technical", "fundamental", "momentum", "quality", "earnings_drift"]
-    if args.factors:
+    if args.sub_decomp:
+        if args.factors:
+            log.error("--sub-decomp and --factors are mutually exclusive.")
+            return
+        FACTORS = list(SUB_FACTORS)
+        log.info("=" * 80)
+        log.info("SUB-DECOMPOSITION MODE — using %d sub-features instead of 5 composites", len(FACTORS))
+        log.info("=" * 80)
+        log.info("  Features: %s", FACTORS)
+        # Redirect output + cache so existing 5-factor artifacts stay intact.
+        args.output_dir = os.path.join(args.output_dir, "sub")
+    elif args.factors:
         selected = [f.strip() for f in args.factors.split(",")]
         invalid = [f for f in selected if f not in ALL_FACTORS]
         if invalid:
@@ -869,10 +984,12 @@ def main() -> None:
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Universe-scoped cache so US (russell1000/sp500) and IN (nifty500) runs
-    # don't overwrite each other's factor matrices.
+    # don't overwrite each other's factor matrices. Sub-decomp uses its own
+    # cache file so we can switch modes without rebuilding the composite matrix.
     if not args.cache_matrix:
         safe_uni = args.universe.lower().replace(",", "_").replace(" ", "")[:40]
-        args.cache_matrix = f"cache/factor_matrix_{safe_uni}.parquet"
+        suffix = "_sub" if args.sub_decomp else ""
+        args.cache_matrix = f"cache/factor_matrix_{safe_uni}{suffix}.parquet"
     log.info("Factor matrix cache: %s  (universe=%s)", args.cache_matrix, args.universe)
 
     # ── Build or load factor matrix ───────────────────────────────────────────
@@ -880,21 +997,6 @@ def main() -> None:
         log.info("Loading cached factor matrix from %s", args.cache_matrix)
         df_all = pd.read_parquet(args.cache_matrix)
         df_all["date"] = pd.to_datetime(df_all["date"])
-        
-        # Check if all required FACTORS are present in df_all
-        missing_factors = [f for f in FACTORS if f not in df_all.columns]
-        if missing_factors:
-            log.warning("=" * 80)
-            log.warning("WARNING: Loaded cached factor matrix is missing requested factors: %s", missing_factors)
-            log.warning("To include these factors, please re-run with the '--rebuild-matrix' flag.")
-            log.warning("=" * 80)
-            
-            # Automatically adjust FACTORS to only those present in the cache
-            FACTORS = [f for f in FACTORS if f in df_all.columns]
-            if not FACTORS:
-                log.error("None of the requested factors are present in the cached matrix. Please rebuild with --rebuild-matrix.")
-                return
-            log.info("Continuing with available factors in cache: %s", FACTORS)
     else:
         symbols = _resolve_universe(args.universe)
         if args.sample_size and args.sample_size < len(symbols):
@@ -911,6 +1013,7 @@ def main() -> None:
             end=pd.Timestamp(args.test_end),
             horizon_days=args.horizon_days,
             freq=args.freq,
+            sub_decomp=args.sub_decomp,
         )
         os.makedirs(os.path.dirname(args.cache_matrix) or ".", exist_ok=True)
         df_all.to_parquet(args.cache_matrix, index=False)
@@ -951,6 +1054,7 @@ def main() -> None:
         objective=args.bayes_objective, lambda_mono=args.lambda_mono,
         lambda_cagr=args.lambda_cagr, beta=args.beta,
         horizon_days=args.horizon_days, output_dir=args.output_dir,
+        top_pct=args.top_pct,
     )
     _common_slsqp_kw = dict(
         n_starts=args.n_starts, lambda_mono=args.lambda_mono,
@@ -1159,4 +1263,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
