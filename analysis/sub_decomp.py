@@ -69,12 +69,18 @@ against the new distribution (or use a percentile-based filter instead).
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 import numpy as np
 import pandas as pd
 
 log = logging.getLogger(__name__)
+
+# Path to the WFO out-of-sample weights schedule. Each row is one month with
+# weights trained on the preceding 36-month window, so using row R's weights
+# at any date >= row R's test_start is honest out-of-sample evaluation.
+WFO_SCHEDULE_PATH = Path(__file__).resolve().parents[1] / "reports" / "regression" / "sub" / "walk_forward_regression.csv"
 
 # ── Feature definitions (canonical order) ─────────────────────────────────────
 SUB_FACTORS: list[str] = [
@@ -244,3 +250,94 @@ def apply_sub_decomp(
         coverage = (~df_raw.isna()).mean() * 100.0
         log.debug("sub_decomp: applied to %d symbols; per-feature coverage:\n%s",
                   len(reports), coverage.round(1).to_string())
+
+
+# ── WFO weight schedule (dynamic, date-aware weights) ──────────────────────────────
+# These helpers replace the single static SUB_SCORE_WEIGHTS vector with a
+# month-indexed schedule so that:
+#   * The historical backtester uses each rebalance month's own out-of-sample
+#     weights (no look-ahead bias: row R was trained on data BEFORE R).
+#   * The live screener uses the most recent fold's weights, automatically
+#     picking up new fits whenever the WFO is re-run.
+
+_SCHEDULE_CACHE: pd.DataFrame | None = None
+_SCHEDULE_MTIME: float = -1.0
+
+
+def load_wfo_weight_schedule(path: str | Path | None = None) -> pd.DataFrame | None:
+    """Load the WFO out-of-sample weight schedule from CSV.
+
+    Returns a DataFrame indexed by month-start ``pd.Timestamp`` with one
+    column per ``SUB_FACTORS`` entry, or ``None`` if the file is missing.
+    Cached and auto-invalidated on file mtime change so re-runs of the WFO
+    are picked up without restarting the process.
+    """
+    global _SCHEDULE_CACHE, _SCHEDULE_MTIME
+    p = Path(path) if path is not None else WFO_SCHEDULE_PATH
+    if not p.exists():
+        return None
+    mtime = p.stat().st_mtime
+    if _SCHEDULE_CACHE is not None and mtime == _SCHEDULE_MTIME:
+        return _SCHEDULE_CACHE
+    df = pd.read_csv(p)
+    if "test_start" not in df.columns:
+        log.warning("WFO schedule %s has no 'test_start' column; ignoring.", p)
+        return None
+    # Convert 'YYYY-MM' (or 'YYYY-MM-DD') to month-start Timestamp.
+    df["_month"] = pd.to_datetime(df["test_start"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+    df = df.dropna(subset=["_month"]).sort_values("_month").set_index("_month")
+    # Keep only weight columns we actually have extractors for.
+    keep = [f"w_{f}" for f in SUB_FACTORS if f"w_{f}" in df.columns]
+    if len(keep) != len(SUB_FACTORS):
+        missing = [f for f in SUB_FACTORS if f"w_{f}" not in df.columns]
+        log.warning("WFO schedule missing weight columns for: %s. Falling back to baked defaults for those.", missing)
+    wdf = df[keep].copy()
+    wdf.columns = [c[2:] for c in wdf.columns]  # strip 'w_' prefix
+    _SCHEDULE_CACHE = wdf
+    _SCHEDULE_MTIME = mtime
+    log.info("Loaded WFO weight schedule: %d folds from %s to %s (%s)",
+             len(wdf), wdf.index.min().strftime("%Y-%m"), wdf.index.max().strftime("%Y-%m"), p)
+    return wdf
+
+
+def get_weights_for_date(
+    asof: pd.Timestamp | str | None = None,
+    *,
+    schedule: pd.DataFrame | None = None,
+    fallback: dict[str, float] | None = None,
+) -> dict[str, float]:
+    """Look up the WFO weights to use at ``asof`` date.
+
+    Resolution rule:
+      * Find the most recent schedule row whose month <= asof month
+        (i.e. "the last fold whose training data ends before asof").
+      * If no such row exists (asof is BEFORE the first fold), return the
+        ``fallback`` weights so historical backtests pre-2023 still work.
+      * If no schedule is available at all, return ``fallback``.
+
+    ``fallback`` defaults to the baked-in ``SUB_SCORE_WEIGHTS``.
+    """
+    if fallback is None:
+        fallback = dict(SUB_SCORE_WEIGHTS)
+    if schedule is None:
+        schedule = load_wfo_weight_schedule()
+    if schedule is None or schedule.empty:
+        return fallback
+    if asof is None:
+        # Live mode: use most recent fold.
+        row = schedule.iloc[-1]
+    else:
+        ts = pd.Timestamp(asof).to_period("M").to_timestamp()
+        eligible = schedule.loc[:ts]
+        if eligible.empty:
+            return fallback  # asof predates all folds
+        row = eligible.iloc[-1]
+    out = dict(fallback)  # start with fallback so missing features keep defaults
+    for f in SUB_FACTORS:
+        if f in row.index and pd.notna(row[f]):
+            out[f] = float(row[f])
+    # Renormalize defensively in case the row's sum drifts off 1.0.
+    total = sum(out.values())
+    if total > 0:
+        out = {k: v / total for k, v in out.items()}
+    return out
