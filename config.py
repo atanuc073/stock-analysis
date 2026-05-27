@@ -15,8 +15,8 @@ CACHE_DIR.mkdir(exist_ok=True)
 # ── Runtime ──────────────────────────────────────────────────────────────────
 RUN_MODE = os.getenv("RUN_MODE", "watchlist").lower()  # "watchlist" | "broad"
 TOP_N = int(os.getenv("TOP_N", "15"))
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))  # parallel ticker downloads (8 = good speed/rate-limit balance)
-FETCH_DELAY_MS = int(os.getenv("FETCH_DELAY_MS", "200"))  # ms stagger per thread to avoid Yahoo 429s
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "12"))  # parallel ticker downloads (high speed, balanced)
+FETCH_DELAY_MS = int(os.getenv("FETCH_DELAY_MS", 200))  # ms stagger per thread to avoid Yahoo 429s
 
 # Forecaster: "prophet" (default), "linear" (lightweight), "timesfm" (best, needs ~2GB deps)
 FORECASTER = os.getenv("FORECASTER", "prophet").lower()
@@ -63,32 +63,32 @@ WATCHLIST = WATCHLIST_INDIA + WATCHLIST_US
 # (RS momentum + earnings drift) and demote mean-reversion signals.
 
 # Deployed optimized weights from Nifty 500 Bayesian WFO and factor regression
-# (Calibrated to WFO out-of-sample averages: 50% Quality, 30% Momentum, 20% Earnings Drift)
-# SCORE_WEIGHTS = {
-#     "technical":       0.000,
-#     "fundamental":     0.000,
-#     "momentum":        0.300,
-#     "quality":         0.500,
-#     "earnings_drift":  0.200,
-#     "sentiment":       0.00,
-#     "options":         0.00,
-#     "forecast":        0.00,
-#     "valuation":       0.00,
-# }
-
-# Deployed optimized weights from S&P 500 Bayesian WFO and factor regression
-# (Calibrated to WFO out-of-sample averages: 89% Quality, 10% Earnings Drift, 1% Momentum)
+# (Calibrated to WFO out-of-sample averages: 60.06% Quality, 23.47% Momentum, 9.66% Earnings Drift, 6.81% Fundamental)
 SCORE_WEIGHTS = {
     "technical":       0.000,
-    "fundamental":     0.000,
-    "momentum":        0.010,
-    "quality":         0.890,
-    "earnings_drift":  0.100,
+    "fundamental":     0.0681,
+    "momentum":        0.2347,
+    "quality":         0.6006,
+    "earnings_drift":  0.0966,
     "sentiment":       0.00,
     "options":         0.00,
     "forecast":        0.00,
     "valuation":       0.00,
 }
+
+# Deployed optimized weights from S&P 500 Bayesian WFO and factor regression
+# (Calibrated to WFO out-of-sample averages: 89% Quality, 10% Earnings Drift, 1% Momentum)
+# SCORE_WEIGHTS = {
+#     "technical":       0.000,
+#     "fundamental":     0.000,
+#     "momentum":        0.010,
+#     "quality":         0.890,
+#     "earnings_drift":  0.100,
+#     "sentiment":       0.00,
+#     "options":         0.00,
+#     "forecast":        0.00,
+#     "valuation":       0.00,
+# }
 # Sanity check at import: weights MUST sum to 1.0 or backtest composites
 # come out scaled (e.g. sum=0.85 → top scores ~68 instead of 80, blowing
 # past the 70 buy threshold and producing zero trades).

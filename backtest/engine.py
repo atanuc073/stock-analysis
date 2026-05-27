@@ -222,10 +222,22 @@ class BacktestEngine:
         # Re-entry lock: track last stop-loss date per symbol
         self._last_stop_loss_date: dict[str, pd.Timestamp] = {}
 
+        # Dynamic parameter updates
+        self.dynamic_weights_csv: Optional[str] = None
+        self.dynamic_weights_df: Optional[pd.DataFrame] = None
+        self._last_weights_month: Optional[str] = None
+
     # ── Public API ───────────────────────────────────────────────────────────
     def run(self, dates: pd.DatetimeIndex) -> BacktestResult:
         if len(dates) == 0:
             raise ValueError("No trading dates provided")
+
+        if self.dynamic_weights_csv:
+            try:
+                self.dynamic_weights_df = pd.read_csv(self.dynamic_weights_csv)
+                log.info("Loaded dynamic weights from %s", self.dynamic_weights_csv)
+            except Exception as e:
+                log.error("Failed to load dynamic weights from %s: %s", self.dynamic_weights_csv, e)
 
         log.info("Backtest: %s → %s, %d days, %d symbols, capital ₹%s",
                  dates[0].date(), dates[-1].date(), len(dates),
@@ -249,6 +261,34 @@ class BacktestEngine:
                      self._warmup_cutoff.date(), self.cfg.warmup_days)
 
         for asof in tqdm(dates, desc="Simulating"):
+            # Update dynamic monthly weights if configured
+            if self.dynamic_weights_df is not None:
+                month_key = asof.strftime("%Y-%m")
+                if self._last_weights_month != month_key:
+                    self._last_weights_month = month_key
+                    row = self.dynamic_weights_df[self.dynamic_weights_df["test_start"] == month_key]
+                    if not row.empty:
+                        row_data = row.iloc[0]
+                        w_q = float(row_data["w_quality"])
+                        w_f = float(row_data["w_fundamental"])
+                        w_m = float(row_data["w_momentum"])
+                        w_ed = float(row_data["w_earnings_drift"])
+                        total = w_q + w_f + w_m + w_ed
+                        if total > 0:
+                            self.cfg.weights = {
+                                "technical": 0.0,
+                                "fundamental": w_f / total,
+                                "momentum": w_m / total,
+                                "quality": w_q / total,
+                                "earnings_drift": w_ed / total,
+                                "sentiment": 0.0,
+                                "options": 0.0,
+                                "forecast": 0.0,
+                                "valuation": 0.0,
+                            }
+                            log.debug("Dynamic weights for %s: Q=%.2f%%, ED=%.2f%%, M=%.2f%%, F=%.2f%%",
+                                      month_key, (w_q/total)*100, (w_ed/total)*100, (w_m/total)*100, (w_f/total)*100)
+
             # Update regime daily (internally respects frequency checks)
             self._refresh_regime(asof)
 

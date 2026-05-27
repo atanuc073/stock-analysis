@@ -176,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--warmup-days", type=int, default=0,
                    help="Skip new entries for the first N trading days (default 0 = "
                         "disabled). Data-loader fetches extra history separately.")
+    p.add_argument("--dynamic-weights", action="store_true",
+                   help="Load monthly walk-forward regression weights dynamically")
     args = p.parse_args(argv)
 
     output_dir = Path(args.output_dir) if args.output_dir else REPORTS_DIR / "backtest"
@@ -251,6 +253,8 @@ def main(argv: list[str] | None = None) -> int:
     exit_val = args.trail_stop_pct / 100.0 if args.trail_stop_pct else None
     exit_cfg = ExitConfig(trail_stop_pct=exit_val) if exit_val else None
     engine = BacktestEngine(data=data, config=cfg, exit_cfg=exit_cfg, regime_data=regime_data or None)
+    if args.dynamic_weights:
+        engine.dynamic_weights_csv = "D:\\MY_WORK\\stock_analysis\\reports\\regression\\walk_forward_regression.csv"
     result = engine.run(dates)
 
     # 4) Stats
