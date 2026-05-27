@@ -845,7 +845,7 @@ def main() -> None:
     ap.add_argument("--val-start",   default="2025-01-01")
     ap.add_argument("--val-end",     default="2025-06-30")
     ap.add_argument("--test-start",  default="2025-07-01")
-    ap.add_argument("--test-end",    default="2025-12-31")
+    ap.add_argument("--test-end",    default="2026-05-24")
     ap.add_argument("--horizon-days", type=int, default=21,
                     help="Forward-return horizon in trading days (default 21 ~ 1 month).")
     ap.add_argument("--freq", default="ME",
