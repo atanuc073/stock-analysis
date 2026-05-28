@@ -82,33 +82,12 @@ log = logging.getLogger(__name__)
 # at any date >= row R's test_start is honest out-of-sample evaluation.
 WFO_SCHEDULE_PATH = Path(__file__).resolve().parents[1] / "reports" / "regression" / "sub" / "walk_forward_regression.csv"
 
-# Universe-specific WFO schedules. Optimal weights differ materially across
-# universes (Russell1000 leans fund_growth ~0.30, Nifty500 leans mom_rs +
-# tech_extension; L1 distance between their blends is 0.63). Use the right
-# schedule for the right universe.
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-UNIVERSE_WFO_PATHS: dict[str, Path] = {
-    # India
-    "nifty500":  _REPO_ROOT / "reports" / "regression" / "sub" / "walk_forward_regression.csv",
-    "nse_all":   _REPO_ROOT / "reports" / "regression" / "sub" / "walk_forward_regression.csv",
-    "watchlist": _REPO_ROOT / "reports" / "regression" / "sub" / "walk_forward_regression.csv",
-    # US
-    "russell1000": _REPO_ROOT / "reports" / "regression" / "russell1000_sub" / "sub" / "walk_forward_regression.csv",
-    "russell2000": _REPO_ROOT / "reports" / "regression" / "russell1000_sub" / "sub" / "walk_forward_regression.csv",
-    "sp500":       _REPO_ROOT / "reports" / "regression" / "sp500_bayesian" / "sub" / "walk_forward_regression.csv",
-}
-
-
-def resolve_wfo_path(universe: str | None) -> Path:
-    """Return the WFO schedule path for ``universe`` (None / unknown → default Nifty500)."""
-    if not universe:
-        return WFO_SCHEDULE_PATH
-    return UNIVERSE_WFO_PATHS.get(universe.lower(), WFO_SCHEDULE_PATH)
-
 # ── Feature definitions (canonical order) ─────────────────────────────────────
 SUB_FACTORS: list[str] = [
     "tech_trend", "tech_extension", "tech_volume",
-    "mom_12_1", "mom_3m", "mom_rs",
+    
+"tech_max5", "tech_52wh_prox", "tech_low_vol",
+    "mom_12_1", "mom_3m", "mom_rs", "mom_str_1m",
     "qual_gpa", "qual_fcf", "qual_roa",
     "fund_value", "fund_growth",
     "earnings_drift",
@@ -123,10 +102,15 @@ SUB_EXTRACTORS: dict[str, tuple[Callable[[Any], Any], int]] = {
     "tech_trend":     (lambda s: (s.technical or {}).get("pct_above_sma200"), +1),
     "tech_extension": (lambda s: (s.technical or {}).get("pct_from_sma20"),   -1),  # less extension = better
     "tech_volume":    (lambda s: (s.technical or {}).get("inst_score"),       +1),
+    # tier-1 PIT-safe additions (price-derived, academic anomalies)
+    "tech_max5":      (lambda s: (s.technical or {}).get("max5_ret"),         -1),  # lottery / blow-off (Bali-Cakici-Whitelaw)
+    "tech_52wh_prox": (lambda s: (s.technical or {}).get("prox_52wh"),        +1),  # 52w-high anchoring (George-Hwang)
+    "tech_low_vol":   (lambda s: (s.technical or {}).get("vol_60d"),          -1),  # low-vol anomaly (Ang-Hodrick-Xing-Zhang)
     # momentum
     "mom_12_1":       (lambda s: (s.momentum  or {}).get("mom_12_1"),         +1),
     "mom_3m":         (lambda s: (s.momentum  or {}).get("ret_3m"),           +1),
     "mom_rs":         (lambda s: (s.momentum  or {}).get("rs_value"),         +1),
+    "mom_str_1m":     (lambda s: (s.momentum  or {}).get("ret_1m"),           -1),  # short-term reversal (Jegadeesh 1990)
     # quality
     "qual_gpa":       (lambda s: (s.quality   or {}).get("gpa"),              +1),
     "qual_fcf":       (lambda s: (s.quality   or {}).get("fcf_yield"),        +1),
@@ -144,18 +128,25 @@ SUB_EXTRACTORS: dict[str, tuple[Callable[[Any], Any], int]] = {
 # Bayesian-GP optimizer with 60 calls per fold.
 # Weights below are the mean across all 34 OOS folds (already sum to 1.0).
 SUB_SCORE_WEIGHTS: dict[str, float] = {
-    "tech_extension":  0.2257,
-    "mom_rs":          0.1746,
-    "mom_12_1":        0.1360,
-    "qual_fcf":        0.0819,
-    "earnings_drift":  0.0808,
-    "fund_growth":     0.0695,
-    "qual_gpa":        0.0601,
-    "qual_roa":        0.0567,
-    "mom_3m":          0.0379,
-    "fund_value":      0.0310,
-    "tech_trend":      0.0306,
-    "tech_volume":     0.0153,
+    # Existing 12 weights scaled by 0.84 to make room for 4 new tier-1 factors.
+    "tech_extension":  0.1896,
+    "mom_rs":          0.1467,
+    "mom_12_1":        0.1142,
+    "qual_fcf":        0.0688,
+    "earnings_drift":  0.0679,
+    "fund_growth":     0.0584,
+    "qual_gpa":        0.0505,
+    "qual_roa":        0.0476,
+    "mom_3m":          0.0318,
+    "fund_value":      0.0260,
+    "tech_trend":      0.0257,
+    "tech_volume":     0.0129,
+    # New tier-1 factors: equal starter weights of 0.04 each (4 * 0.04 = 0.16).
+    # WFO will retune these; they're just non-zero priors so the optimizer sees them.
+    "tech_max5":       0.0400,
+    "tech_52wh_prox":  0.0400,
+    "tech_low_vol":    0.0400,
+    "mom_str_1m":      0.0399,  # 0.0399 so total rounds to exactly 1.0000
 }
 assert abs(sum(SUB_SCORE_WEIGHTS.values()) - 1.0) < 1e-3, (
     f"SUB_SCORE_WEIGHTS must sum to ~1.0, got {sum(SUB_SCORE_WEIGHTS.values())}"
@@ -185,16 +176,43 @@ def extract_raw(obj: Any) -> dict[str, float]:
     return out
 
 
-def rank_transform(df_raw: pd.DataFrame) -> pd.DataFrame:
+# Fundamentals are ranked within (sector) when sector info is available so the
+# composite isn't a hidden sector bet (tech is always "expensive" on raw P/E,
+# energy always "cheap", etc.). Technicals/momentum/earnings-drift have no
+# sector-relative interpretation and stay universe-ranked. Mirror the same
+# split used during WFO training in backtest/factor_regression.py.
+SECTOR_RELATIVE_FEATURES: frozenset[str] = frozenset({
+    "fund_value", "fund_growth", "qual_gpa", "qual_fcf", "qual_roa",
+})
+MIN_SECTOR_N: int = 5
+
+
+def rank_transform(
+    df_raw: pd.DataFrame,
+    sectors: pd.Series | None = None,
+) -> pd.DataFrame:
     """Cross-sectional percentile rank-transform → 0-100, NaN → 50.
 
-    Operates on a wide DataFrame where rows are symbols and columns are
-    feature names. The transform is applied independently per column.
+    Rows are symbols, columns are feature names. When ``sectors`` is provided
+    (a Series aligned to ``df_raw.index`` mapping symbol → sector), columns in
+    :data:`SECTOR_RELATIVE_FEATURES` are ranked **within sector** with a
+    universe-rank fallback whenever a sector has fewer than
+    :data:`MIN_SECTOR_N` members in the batch. All other columns are
+    ranked universe-wide. When ``sectors`` is ``None`` the legacy
+    universe-only behavior is preserved.
     """
     out = pd.DataFrame(index=df_raw.index, columns=df_raw.columns, dtype=float)
+    use_sector = sectors is not None and len(SECTOR_RELATIVE_FEATURES & set(df_raw.columns)) > 0
+    if use_sector:
+        sec = sectors.reindex(df_raw.index).fillna("Unknown")
     for col in df_raw.columns:
-        ranked = df_raw[col].rank(pct=True, na_option="keep") * 100.0
-        out[col] = ranked.fillna(50.0)
+        universe = df_raw[col].rank(pct=True, na_option="keep") * 100.0
+        if use_sector and col in SECTOR_RELATIVE_FEATURES:
+            sec_rank = df_raw[col].groupby(sec).rank(pct=True, na_option="keep") * 100.0
+            sec_count = df_raw[col].groupby(sec).transform("count")
+            out[col] = sec_rank.where(sec_count >= MIN_SECTOR_N, universe).fillna(50.0)
+        else:
+            out[col] = universe.fillna(50.0)
     return out
 
 
@@ -232,15 +250,19 @@ def apply_sub_decomp(
 
     # 1) Extract raw signed values into a wide DataFrame (rows=symbols).
     symbols: list[str] = []
+    sectors_list: list[str] = []
     raw_rows: list[dict[str, float]] = []
     for r in reports:
         sym = getattr(r, "symbol", None) or str(id(r))
         symbols.append(sym)
+        sectors_list.append(str(getattr(r, "sector", None) or "Unknown"))
         raw_rows.append(extract_raw(r))
     df_raw = pd.DataFrame(raw_rows, index=symbols, columns=SUB_FACTORS)
+    sectors = pd.Series(sectors_list, index=symbols, name="sector")
 
-    # 2) Per-feature cross-sectional rank → 0-100 (NaN → 50).
-    df_rank = rank_transform(df_raw)
+    # 2) Per-feature cross-sectional rank → 0-100 (NaN → 50). Fundamentals are
+    #    ranked within sector; technicals/momentum/earnings-drift universe-wide.
+    df_rank = rank_transform(df_raw, sectors=sectors)
 
     # 3) Weighted sum across the 12 columns. Use only weights for features
     #    that survive (defensive in case caller passes a subset).
@@ -283,30 +305,25 @@ def apply_sub_decomp(
 #   * The live screener uses the most recent fold's weights, automatically
 #     picking up new fits whenever the WFO is re-run.
 
-_SCHEDULE_CACHE: dict[Path, tuple[float, pd.DataFrame]] = {}
+_SCHEDULE_CACHE: pd.DataFrame | None = None
+_SCHEDULE_MTIME: float = -1.0
 
 
-def load_wfo_weight_schedule(
-    path: str | Path | None = None,
-    *,
-    universe: str | None = None,
-) -> pd.DataFrame | None:
+def load_wfo_weight_schedule(path: str | Path | None = None) -> pd.DataFrame | None:
     """Load the WFO out-of-sample weight schedule from CSV.
 
-    Resolution: explicit ``path`` > ``universe`` lookup > default Nifty500 path.
-    Per-path cache (keyed by resolved path + mtime) so multiple universes
-    don't evict each other.
+    Returns a DataFrame indexed by month-start ``pd.Timestamp`` with one
+    column per ``SUB_FACTORS`` entry, or ``None`` if the file is missing.
+    Cached and auto-invalidated on file mtime change so re-runs of the WFO
+    are picked up without restarting the process.
     """
-    if path is not None:
-        p = Path(path)
-    else:
-        p = resolve_wfo_path(universe)
+    global _SCHEDULE_CACHE, _SCHEDULE_MTIME
+    p = Path(path) if path is not None else WFO_SCHEDULE_PATH
     if not p.exists():
         return None
     mtime = p.stat().st_mtime
-    cached = _SCHEDULE_CACHE.get(p)
-    if cached is not None and cached[0] == mtime:
-        return cached[1]
+    if _SCHEDULE_CACHE is not None and mtime == _SCHEDULE_MTIME:
+        return _SCHEDULE_CACHE
     df = pd.read_csv(p)
     if "test_start" not in df.columns:
         log.warning("WFO schedule %s has no 'test_start' column; ignoring.", p)
@@ -318,10 +335,11 @@ def load_wfo_weight_schedule(
     keep = [f"w_{f}" for f in SUB_FACTORS if f"w_{f}" in df.columns]
     if len(keep) != len(SUB_FACTORS):
         missing = [f for f in SUB_FACTORS if f"w_{f}" not in df.columns]
-        log.warning("WFO schedule %s missing weight columns for: %s. Falling back to baked defaults for those.", p, missing)
+        log.warning("WFO schedule missing weight columns for: %s. Falling back to baked defaults for those.", missing)
     wdf = df[keep].copy()
     wdf.columns = [c[2:] for c in wdf.columns]  # strip 'w_' prefix
-    _SCHEDULE_CACHE[p] = (mtime, wdf)
+    _SCHEDULE_CACHE = wdf
+    _SCHEDULE_MTIME = mtime
     log.info("Loaded WFO weight schedule: %d folds from %s to %s (%s)",
              len(wdf), wdf.index.min().strftime("%Y-%m"), wdf.index.max().strftime("%Y-%m"), p)
     return wdf
@@ -395,7 +413,6 @@ def get_weights_for_date(
     schedule: pd.DataFrame | None = None,
     fallback: dict[str, float] | None = None,
     live_blend: bool = True,
-    universe: str | None = None,
 ) -> dict[str, float]:
     """Look up the WFO weights to use at ``asof`` date.
 
@@ -405,10 +422,6 @@ def get_weights_for_date(
     in production. Look-ahead safety is preserved by slicing the schedule
     to ``[:asof]`` BEFORE blending so only folds whose ``test_start <=
     asof`` participate.
-
-    ``universe`` (e.g. "nifty500", "russell1000") routes to the right WFO CSV
-    (see ``UNIVERSE_WFO_PATHS``). Optimal weights differ materially across
-    universes; using the wrong file silently degrades the strategy.
 
     Resolution rule:
       * ``asof=None`` (LIVE):
@@ -425,7 +438,7 @@ def get_weights_for_date(
     if fallback is None:
         fallback = dict(SUB_SCORE_WEIGHTS)
     if schedule is None:
-        schedule = load_wfo_weight_schedule(universe=universe)
+        schedule = load_wfo_weight_schedule()
     if schedule is None or schedule.empty:
         return fallback
 
