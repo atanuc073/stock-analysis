@@ -631,12 +631,17 @@ def bayesian_search_weights(
         X = np.array(Z_observed)
         Y = np.array(Y_observed)
 
+        import warnings
+        from sklearn.exceptions import ConvergenceWarning
+
         # Fit GP
-        gp = GaussianProcessRegressor(
-            kernel=kernel, n_restarts_optimizer=3, alpha=1e-6,
-            normalize_y=True, random_state=seed + i,
-        )
-        gp.fit(X, Y)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            gp = GaussianProcessRegressor(
+                kernel=kernel, n_restarts_optimizer=3, alpha=1e-6,
+                normalize_y=True, random_state=seed + i,
+            )
+            gp.fit(X, Y)
 
         # Generate candidate points and pick the one with highest EI
         n_candidates = 2000

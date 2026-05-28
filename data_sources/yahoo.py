@@ -40,6 +40,8 @@ def _fetch_one(symbol: str, period: str = "1y", max_retries: int = 4) -> TickerD
         try:
             t = yf.Ticker(symbol)
             td.history = t.history(period=period, auto_adjust=True)
+            if not td.history.empty and "Close" in td.history.columns:
+                td.history = td.history.dropna(subset=["Close"])
             if td.history.empty:
                 last_err = "no history"
                 # empty history can be transient; retry

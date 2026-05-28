@@ -95,7 +95,7 @@ UNIVERSE_WFO_PATHS: dict[str, Path] = {
     # US
     "russell1000": _REPO_ROOT / "reports" / "regression" / "russell1000_sub" / "sub" / "walk_forward_regression.csv",
     "russell2000": _REPO_ROOT / "reports" / "regression" / "russell1000_sub" / "sub" / "walk_forward_regression.csv",
-    "sp500":       _REPO_ROOT / "reports" / "regression" / "russell1000_sub" / "sub" / "walk_forward_regression.csv",
+    "sp500":       _REPO_ROOT / "reports" / "regression" / "sp500_bayesian" / "sub" / "walk_forward_regression.csv",
 }
 
 
