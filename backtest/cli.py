@@ -132,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="Require RS percentile rank >= this (0-100, default 0 = no hard filter; "
                         "try 70 for leaders-only). RS score bump is always applied either way.")
     p.add_argument("--base-position-weight", type=float, default=0.15,
-                   help="Base weight allocated to each position (default 0.10 = 10%)")
+                   help="Base weight allocated to each position (default 0.10 = 10%%)")
     p.add_argument("--ignore-cash-floor", action="store_true",
                    help="Bypass all regime-based cash floors to stay fully invested at all times.")
     p.add_argument("--max-sector-weight", type=float, default=0.30,
@@ -164,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--regime-skip-below", default="NONE",
                    choices=["NONE", "BEAR", "CAUTIOUS", "NEUTRAL", "NEUTRAL_BULL", "BULL"],
                    help="Skip new entries when regime label <= this (default NONE — "
-                        "May'26 audit showed CAUTIOUS trades contribute ~0% of P&L)")
+                        "May'26 audit showed CAUTIOUS trades contribute ~0%% of P&L)")
     p.add_argument("--sip-amount", type=float, default=0.0,
                    help="SIP amount per month (INR). 0 = lumpsum mode (default)")
     p.add_argument("--sip-day", type=int, default=13,
