@@ -64,7 +64,12 @@ N_QUANTILES = 5
 # analysis/sub_decomp.py so the WFO optimizer, the live screener, and the
 # backtest engine all use the exact same feature set. We alias them here under
 # the module-private name expected by the existing build_factor_matrix logic.
-from analysis.sub_decomp import SUB_FACTORS, SUB_EXTRACTORS as _SUB_EXTRACTORS  # noqa: E402
+from analysis.sub_decomp import (  # noqa: E402
+    SUB_FACTORS,
+    SUB_EXTRACTORS as _SUB_EXTRACTORS,
+    SECTOR_RELATIVE_FEATURES,
+    MIN_SECTOR_N,
+)
 
 
 # ── Factor matrix construction ────────────────────────────────────────────────
@@ -150,6 +155,7 @@ def build_factor_matrix(
                 "date": asof,
                 "fwd_ret": fwd,
                 "market": s.market,
+                "sector": (getattr(s, "sector", None) or "Unknown"),
                 # Filter columns (NOT used in composite — used to gate rows pre-fit)
                 "rs_pct": float((s.uptrend_data or {}).get("rs_pct", 0.0) or 0.0),
                 "pct_above_sma200": float(s.technical.get("pct_above_sma200", 0.0) or 0.0),
@@ -176,14 +182,25 @@ def build_factor_matrix(
     df = pd.DataFrame(rows)
 
     if sub_decomp and len(df):
-        # Per-date cross-sectional rank transform → 0-100 percentile. NaN rows
-        # get assigned to the median rank (50) so missing data is neutral, not
-        # extreme. This makes scales comparable across heterogeneous features
-        # (P/E, momentum %, GPA, etc.) and is what professional factor models do.
-        log.info("  Rank-transforming %d sub-features per date → 0-100 percentile (NaN → 50) ...", len(SUB_FACTORS))
+        # Per-date cross-sectional rank transform → 0-100 percentile.
+        # Fundamentals (value/growth/quality) are ranked WITHIN sector to remove
+        # structural sector tilt (tech always "expensive" on P/E, energy always
+        # "cheap" etc.). Technicals/momentum stay universe-ranked because they
+        # have no sector-relative interpretation. Falls back to universe rank
+        # when a sector has <MIN_SECTOR_N names on a given date.
+        log.info("  Rank-transforming %d sub-features per date (sector-relative=%d, universe=%d, NaN→50) ...",
+                 len(SUB_FACTORS), len(SECTOR_RELATIVE_FEATURES & set(SUB_FACTORS)),
+                 len(set(SUB_FACTORS) - SECTOR_RELATIVE_FEATURES))
+        if "sector" not in df.columns:
+            df["sector"] = "Unknown"
         for f in SUB_FACTORS:
-            ranked = df.groupby("date")[f].rank(pct=True, na_option="keep") * 100.0
-            df[f] = ranked.fillna(50.0)
+            universe = df.groupby("date")[f].rank(pct=True, na_option="keep") * 100.0
+            if f in SECTOR_RELATIVE_FEATURES:
+                sec_rank = df.groupby(["date", "sector"])[f].rank(pct=True, na_option="keep") * 100.0
+                sec_count = df.groupby(["date", "sector"])[f].transform("count")
+                df[f] = sec_rank.where(sec_count >= MIN_SECTOR_N, universe).fillna(50.0)
+            else:
+                df[f] = universe.fillna(50.0)
 
     log.info("Factor matrix built: %d rows | %d unique symbols | %d unique dates | skipped: score=%d fwd_ret=%d",
              len(df), df["symbol"].nunique(), df["date"].nunique(), skip_score, skip_fwd)
@@ -631,17 +648,12 @@ def bayesian_search_weights(
         X = np.array(Z_observed)
         Y = np.array(Y_observed)
 
-        import warnings
-        from sklearn.exceptions import ConvergenceWarning
-
         # Fit GP
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", ConvergenceWarning)
-            gp = GaussianProcessRegressor(
-                kernel=kernel, n_restarts_optimizer=3, alpha=1e-6,
-                normalize_y=True, random_state=seed + i,
-            )
-            gp.fit(X, Y)
+        gp = GaussianProcessRegressor(
+            kernel=kernel, n_restarts_optimizer=3, alpha=1e-6,
+            normalize_y=True, random_state=seed + i,
+        )
+        gp.fit(X, Y)
 
         # Generate candidate points and pick the one with highest EI
         n_candidates = 2000

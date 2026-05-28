@@ -86,8 +86,7 @@ WFO_SCHEDULE_PATH = Path(__file__).resolve().parents[1] / "reports" / "regressio
 SUB_FACTORS: list[str] = [
     "tech_trend", "tech_extension", "tech_volume",
     
-"tech_max5", "tech_52wh_prox", "tech_low_vol",
-    "mom_12_1", "mom_3m", "mom_rs", "mom_str_1m",
+"mom_12_1", "mom_3m", "mom_rs",
     "qual_gpa", "qual_fcf", "qual_roa",
     "fund_value", "fund_growth",
     "earnings_drift",
@@ -102,15 +101,10 @@ SUB_EXTRACTORS: dict[str, tuple[Callable[[Any], Any], int]] = {
     "tech_trend":     (lambda s: (s.technical or {}).get("pct_above_sma200"), +1),
     "tech_extension": (lambda s: (s.technical or {}).get("pct_from_sma20"),   -1),  # less extension = better
     "tech_volume":    (lambda s: (s.technical or {}).get("inst_score"),       +1),
-    # tier-1 PIT-safe additions (price-derived, academic anomalies)
-    "tech_max5":      (lambda s: (s.technical or {}).get("max5_ret"),         -1),  # lottery / blow-off (Bali-Cakici-Whitelaw)
-    "tech_52wh_prox": (lambda s: (s.technical or {}).get("prox_52wh"),        +1),  # 52w-high anchoring (George-Hwang)
-    "tech_low_vol":   (lambda s: (s.technical or {}).get("vol_60d"),          -1),  # low-vol anomaly (Ang-Hodrick-Xing-Zhang)
     # momentum
     "mom_12_1":       (lambda s: (s.momentum  or {}).get("mom_12_1"),         +1),
     "mom_3m":         (lambda s: (s.momentum  or {}).get("ret_3m"),           +1),
     "mom_rs":         (lambda s: (s.momentum  or {}).get("rs_value"),         +1),
-    "mom_str_1m":     (lambda s: (s.momentum  or {}).get("ret_1m"),           -1),  # short-term reversal (Jegadeesh 1990)
     # quality
     "qual_gpa":       (lambda s: (s.quality   or {}).get("gpa"),              +1),
     "qual_fcf":       (lambda s: (s.quality   or {}).get("fcf_yield"),        +1),
@@ -128,25 +122,18 @@ SUB_EXTRACTORS: dict[str, tuple[Callable[[Any], Any], int]] = {
 # Bayesian-GP optimizer with 60 calls per fold.
 # Weights below are the mean across all 34 OOS folds (already sum to 1.0).
 SUB_SCORE_WEIGHTS: dict[str, float] = {
-    # Existing 12 weights scaled by 0.84 to make room for 4 new tier-1 factors.
-    "tech_extension":  0.1896,
-    "mom_rs":          0.1467,
-    "mom_12_1":        0.1142,
-    "qual_fcf":        0.0688,
-    "earnings_drift":  0.0679,
-    "fund_growth":     0.0584,
-    "qual_gpa":        0.0505,
-    "qual_roa":        0.0476,
-    "mom_3m":          0.0318,
-    "fund_value":      0.0260,
-    "tech_trend":      0.0257,
-    "tech_volume":     0.0129,
-    # New tier-1 factors: equal starter weights of 0.04 each (4 * 0.04 = 0.16).
-    # WFO will retune these; they're just non-zero priors so the optimizer sees them.
-    "tech_max5":       0.0400,
-    "tech_52wh_prox":  0.0400,
-    "tech_low_vol":    0.0400,
-    "mom_str_1m":      0.0399,  # 0.0399 so total rounds to exactly 1.0000
+    "tech_extension":  0.2257,
+    "mom_rs":          0.1746,
+    "mom_12_1":        0.1360,
+    "qual_fcf":        0.0819,
+    "earnings_drift":  0.0808,
+    "fund_growth":     0.0695,
+    "qual_gpa":        0.0601,
+    "qual_roa":        0.0567,
+    "mom_3m":          0.0379,
+    "fund_value":      0.0310,
+    "tech_trend":      0.0306,
+    "tech_volume":     0.0153,
 }
 assert abs(sum(SUB_SCORE_WEIGHTS.values()) - 1.0) < 1e-3, (
     f"SUB_SCORE_WEIGHTS must sum to ~1.0, got {sum(SUB_SCORE_WEIGHTS.values())}"

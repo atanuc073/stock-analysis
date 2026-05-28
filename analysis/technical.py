@@ -148,21 +148,6 @@ def compute(df: pd.DataFrame) -> dict:
     pct_from_52w_high = (price / high_52w - 1) * 100  # negative number; 0 = at high
     pct_from_52w_low = (price / low_52w - 1) * 100    # positive number; 0 = at low
 
-    # ── PIT-safe price-derived factors used by the sub-decomp composite ──
-    # 52-week-high proximity (George & Hwang 2004): close / 52w-high in [0, 1].
-    # Higher = closer to high; continuation signal independent of SMA-based trend.
-    prox_52wh = float(price / high_52w) if high_52w > 0 else None
-    # MAX5 (Bali, Cakici & Whitelaw 2011): mean of the 5 largest daily returns
-    # over the last 21 trading days. High MAX5 → lottery-like blow-off → negative
-    # expected return; the consumer applies sign=-1 in sub_decomp.
-    _daily_ret = close.pct_change()
-    _last21 = _daily_ret.tail(21).dropna()
-    max5_ret = float(_last21.nlargest(5).mean()) if len(_last21) >= 5 else None
-    # Realized volatility, 60-day annualized (low-vol anomaly,
-    # Ang/Hodrick/Xing/Zhang 2006). Low vol → higher risk-adjusted return; sign=-1.
-    _ret_60 = _daily_ret.tail(60).dropna()
-    vol_60d = float(_ret_60.std() * np.sqrt(252)) if len(_ret_60) >= 30 else None
-
     # Extension / pullback context
     extended_at_high = pct_from_52w_high > -3      # within 3% of 52w high (danger zone)
     in_base = -25 <= pct_from_52w_high <= -8       # 8-25% off high (consolidation / base)
@@ -252,9 +237,6 @@ def compute(df: pd.DataFrame) -> dict:
         "low_52w": low_52w,
         "pct_from_52w_high": pct_from_52w_high,
         "pct_from_52w_low": pct_from_52w_low,
-        "prox_52wh": prox_52wh,
-        "max5_ret": max5_ret,
-        "vol_60d": vol_60d,
         "pct_from_sma20": ext_20,
         "in_base": bool(in_base),
         "extended_at_high": bool(extended_at_high),
@@ -263,5 +245,4 @@ def compute(df: pd.DataFrame) -> dict:
         "dist_200": pct_above_sma200,
         "adr_20": float(((df["High"] - df["Low"]) / df["Low"] * 100).tail(20).mean()),
         "inst_metrics": inst_metrics,
-        "inst_score": inst_score,
     }

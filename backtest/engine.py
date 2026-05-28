@@ -692,7 +692,7 @@ class BacktestEngine:
         if USE_SUB_DECOMP and self.cfg.weights is None:
             try:
                 from analysis.sub_decomp import apply_sub_decomp, get_weights_for_date
-                w_today = get_weights_for_date(asof, universe=self.cfg.universe or None)
+                w_today = get_weights_for_date(asof)
                 # Score US and IN separately so cross-sectional ranks reflect
                 # the cohort each stock actually competes in.
                 us_scores = [s for s in scores if getattr(s, "market", "") == "US"]
