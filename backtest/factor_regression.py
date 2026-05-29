@@ -957,7 +957,10 @@ def main() -> None:
         log.info("=" * 80)
         log.info("  Features: %s", FACTORS)
         # Redirect output + cache so existing 5-factor artifacts stay intact.
-        args.output_dir = os.path.join(args.output_dir, "sub")
+        if args.output_dir == "reports/regression":
+            args.output_dir = os.path.join(args.output_dir, args.universe.lower(), "sub")
+        else:
+            args.output_dir = os.path.join(args.output_dir, "sub")
     elif args.factors:
         selected = [f.strip() for f in args.factors.split(",")]
         invalid = [f for f in selected if f not in ALL_FACTORS]

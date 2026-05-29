@@ -181,8 +181,6 @@ def analyze_batch(tickers: Iterable[TickerData]) -> list[StockReport]:
         from config import USE_SUB_DECOMP
         if USE_SUB_DECOMP:
             from analysis.sub_decomp import apply_sub_decomp, get_weights_for_date
-            # asof=None => use the most recent WFO fold's weights.
-            w_today = get_weights_for_date(None)
             valid = [r for r in reports if (r.composite_score or 0) > 0]
             # Rank US and IN separately so cross-sectional ranks reflect the
             # universe a stock actually competes in. Mixing them would, e.g.,
@@ -190,9 +188,11 @@ def analyze_batch(tickers: Iterable[TickerData]) -> list[StockReport]:
             us_valid = [r for r in valid if r.market == "US"]
             in_valid = [r for r in valid if r.market == "IN"]
             if us_valid:
-                apply_sub_decomp(us_valid, weights=w_today)
+                w_us = get_weights_for_date(None, universe="sp500")
+                apply_sub_decomp(us_valid, weights=w_us)
             if in_valid:
-                apply_sub_decomp(in_valid, weights=w_today)
+                w_in = get_weights_for_date(None, universe="nifty500")
+                apply_sub_decomp(in_valid, weights=w_in)
     except Exception as _e:
         # Never let sub-decomp break the pipeline — fall back to the existing
         # cross-sectional adjusted_score and log for diagnosis.
