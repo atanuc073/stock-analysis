@@ -244,5 +244,6 @@ def compute(df: pd.DataFrame) -> dict:
         "atr": atr_val,
         "dist_200": pct_above_sma200,
         "adr_20": float(((df["High"] - df["Low"]) / df["Low"] * 100).tail(20).mean()),
+        "inst_score": inst_score,
         "inst_metrics": inst_metrics,
     }

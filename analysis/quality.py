@@ -74,6 +74,14 @@ def compute(info: dict) -> dict:
 
     # ── 1. Gross-profit-to-assets (Novy-Marx) ─────────────────────────
     gpa = None
+    if not total_assets:
+        # Fallback: total_assets = Net Income / ROA
+        net_inc = info.get("netIncomeToCommon") or info.get("netIncome")
+        if net_inc is None and profit_margin is not None and revenue is not None:
+            net_inc = profit_margin * revenue
+        if net_inc is not None and roa and roa > 0:
+            total_assets = net_inc / roa
+
     if gross_margin is not None and revenue is not None and total_assets and total_assets > 0:
         gpa = (gross_margin * revenue) / total_assets
         # 0.10 → 0, 0.40 → +10

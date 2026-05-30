@@ -91,10 +91,15 @@ def _fetch_one(symbol: str, start: str, end: str) -> HistoricalData | None:
         try:
             info = yf.Ticker(symbol).info or {}
             sector = str(info.get("sector") or "")
-            # Persist a small subset
+            # Persist a small subset of fields required by fundamental/quality scoring
             keep = {k: info.get(k) for k in (
-                "sector", "industry", "marketCap", "trailingPE", "priceToBook",
-                "returnOnEquity", "debtToEquity", "earningsGrowth",
+                "sector", "industry", "marketCap", "trailingPE", "forwardPE", "priceToBook",
+                "returnOnEquity", "debtToEquity", "earningsGrowth", "revenueGrowth",
+                "profitMargins", "dividendYield", "enterpriseToEbitda",
+                "grossMargins", "operatingMargins", "returnOnAssets", "freeCashflow",
+                "operatingCashflow", "totalRevenue", "totalAssets", "totalDebt",
+                "totalCash", "currentRatio", "trailingEps", "forwardEps",
+                "netIncomeToCommon", "netIncome",
                 "longName", "shortName",
             ) if info.get(k) is not None}
             if keep:
