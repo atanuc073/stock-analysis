@@ -254,7 +254,8 @@ def _quintile_monotonicity(df: pd.DataFrame, composite: np.ndarray) -> tuple[flo
     return mono, spread
 
 
-def _ndcg_at_k(df: pd.DataFrame, composite: np.ndarray, k: int = 10) -> float:
+def _ndcg_at_k(df: pd.DataFrame, composite: np.ndarray, k: int = 10,
+               exponential_gain: bool = False) -> float:
     """Per-date NDCG@K averaged across dates.
 
     For each rebalance date:
@@ -262,8 +263,9 @@ def _ndcg_at_k(df: pd.DataFrame, composite: np.ndarray, k: int = 10) -> float:
       - predicted ranking = descending composite score
       - NDCG@K measures how well predicted top-K matches ideal top-K
 
-    This directly measures whether the scoring system places the best future
-    performers at the top of the list — which is exactly what a stock ranker needs.
+    Args:
+        exponential_gain: If True, use 2^rel - 1 gain (amplifies distinction
+            between great and good picks). If False, use linear gain (original).
     """
     s = df.assign(composite=composite)
     ndcgs: list[float] = []
@@ -275,12 +277,15 @@ def _ndcg_at_k(df: pd.DataFrame, composite: np.ndarray, k: int = 10) -> float:
         # Predicted: sort by composite desc
         pred_order = g.nlargest(len(g), "composite")["fwd_ret"].values
 
-        # DCG@K with gain = max(0, fwd_ret) to avoid penalizing negatives excessively
         def _dcg(rels: np.ndarray, at_k: int) -> float:
             rels_k = rels[:at_k]
-            # Use 2^rel - 1 gain with shifted rels so all are non-negative
-            # Simpler: use raw return as gain (linear gain, more interpretable)
             discounts = np.log2(np.arange(2, at_k + 2))
+            if exponential_gain:
+                # Shift to non-negative, then 2^rel - 1 gain
+                # This heavily rewards putting the very best stocks at top
+                shifted = rels_k - rels_k.min() if rels_k.min() < 0 else rels_k
+                gains = np.power(2.0, shifted) - 1.0
+                return float(np.sum(gains / discounts))
             return float(np.sum(rels_k / discounts))
 
         dcg = _dcg(pred_order, k)
@@ -290,6 +295,81 @@ def _ndcg_at_k(df: pd.DataFrame, composite: np.ndarray, k: int = 10) -> float:
         elif idcg == 0:
             ndcgs.append(1.0)  # perfect if nothing to gain
     return float(np.mean(ndcgs)) if ndcgs else 0.0
+
+
+def _map_at_k(df: pd.DataFrame, composite: np.ndarray, k: int = 10,
+              relevance_pct: float = 0.2) -> float:
+    """Mean Average Precision @ K — rewards finding relevant stocks in top-K.
+
+    A stock is 'relevant' if its fwd_ret is in the top `relevance_pct` for that
+    date. MAP@K measures how many of the truly-best stocks appear in our top-K
+    predictions, and rewards placing them earlier.
+
+    Unlike NDCG which cares about *ordering*, MAP cares about *inclusion* of
+    the true winners — complementary signals.
+    """
+    s = df.assign(composite=composite)
+    aps: list[float] = []
+    for _, g in s.groupby("date"):
+        n = len(g)
+        if n < k:
+            continue
+        # Define relevant set: top `relevance_pct` by actual fwd_ret
+        n_relevant = max(1, int(round(n * relevance_pct)))
+        relevant_set = set(g.nlargest(n_relevant, "fwd_ret").index)
+
+        # Our predicted top-K
+        predicted_topk = g.nlargest(k, "composite")
+
+        # Average Precision: for each hit in predicted order, precision at that rank
+        hits = 0
+        precision_sum = 0.0
+        for rank, idx in enumerate(predicted_topk.index, 1):
+            if idx in relevant_set:
+                hits += 1
+                precision_sum += hits / rank
+        ap = precision_sum / min(k, n_relevant) if n_relevant > 0 else 0.0
+        aps.append(ap)
+    return float(np.mean(aps)) if aps else 0.0
+
+
+def _bottom_leakage(df: pd.DataFrame, composite: np.ndarray, k: int = 10,
+                    bottom_pct: float = 0.2) -> float:
+    """Fraction of predicted top-K that are actually in the bottom quintile.
+
+    Returns a value in [0, 1] — lower is better. A good ranker should NEVER
+    place actual losers at the top. This directly penalizes catastrophic
+    misranking (e.g., putting a -30% stock in your buy list).
+    """
+    s = df.assign(composite=composite)
+    leakages: list[float] = []
+    for _, g in s.groupby("date"):
+        n = len(g)
+        if n < k:
+            continue
+        n_bottom = max(1, int(round(n * bottom_pct)))
+        bottom_set = set(g.nsmallest(n_bottom, "fwd_ret").index)
+        predicted_topk = g.nlargest(k, "composite")
+        leaked = sum(1 for idx in predicted_topk.index if idx in bottom_set)
+        leakages.append(leaked / k)
+    return float(np.mean(leakages)) if leakages else 0.0
+
+
+def _tail_risk_penalty(df: pd.DataFrame, composite: np.ndarray, k: int = 10) -> float:
+    """Mean of worst return among predicted top-K picks, averaged across dates.
+
+    Returns a negative number (the worse the tail, the more negative).
+    A ranker that avoids putting future losers in the top-K will have a less
+    negative value here.
+    """
+    s = df.assign(composite=composite)
+    worst_picks: list[float] = []
+    for _, g in s.groupby("date"):
+        if len(g) < k:
+            continue
+        predicted_topk = g.nlargest(k, "composite")
+        worst_picks.append(float(predicted_topk["fwd_ret"].min()))
+    return float(np.mean(worst_picks)) if worst_picks else 0.0
 
 
 def _ic_stability(df: pd.DataFrame, composite: np.ndarray) -> tuple[float, float]:
@@ -431,11 +511,17 @@ def _evaluate(
     groups = _precompute_groups(df)
     soft_ret = _softmax_basket_return_grouped(groups, w, beta=beta, horizon_days=horizon_days)
     ndcg = _ndcg_at_k(df, composite, k=10)
+    ndcg_exp = _ndcg_at_k(df, composite, k=10, exponential_gain=True)
+    map_10 = _map_at_k(df, composite, k=10, relevance_pct=0.2)
     ic_mean, ic_std = _ic_stability(df, composite)
+    leakage = _bottom_leakage(df, composite, k=10, bottom_pct=0.2)
+    tail = _tail_risk_penalty(df, composite, k=10)
     return {
         "ic": ic, "mono": mono, "q5q1": spread,
         "top_ret": top_ret, "soft_ret": soft_ret,
-        "ndcg_10": ndcg, "ic_std": ic_std, "ic_ir": ic_mean / ic_std if ic_std > 0 else 0.0,
+        "ndcg_10": ndcg, "ndcg_10_exp": ndcg_exp,
+        "map_10": map_10, "bottom_leakage": leakage, "tail_risk": tail,
+        "ic_std": ic_std, "ic_ir": ic_mean / ic_std if ic_std > 0 else 0.0,
     }
 
 
@@ -599,6 +685,12 @@ def _eval_objective_for_bayes(
                        - λ_ic_stability * IC_std
                    Directly measures: does the scoring produce the right order?
                    Penalizes: unstable signal (high IC variance across dates).
+      'ranking_v2': Enhanced ranking objective with:
+                   - Exponential DCG gain (amplifies top-pick distinction)
+                   - MAP@K (precision of winner inclusion)
+                   - Bottom-leakage penalty (avoid losers in top-K)
+                   - Tail-risk penalty (avoid catastrophic worst-pick)
+                   - IC stability penalty (consistent signal)
     """
     F = df[FACTORS].values
     composite = F @ w
@@ -628,6 +720,31 @@ def _eval_objective_for_bayes(
              + lambda_ndcg * (ndcg - 0.5)   # center NDCG so random=0 contribution
              + lambda_mono * mono * 0.1      # scale mono (~1.0) to IC scale (~0.1)
              - lambda_ic_stability * ic_std)  # penalize instability
+        return j
+
+    if objective == "ranking_v2":
+        # Enhanced ranking: exponential NDCG + MAP + bottom-avoidance + tail-risk
+        ndcg_exp = _ndcg_at_k(df, composite, k=ndcg_k, exponential_gain=True)
+        map_k = _map_at_k(df, composite, k=ndcg_k, relevance_pct=0.2)
+        ic_mean, ic_std = _ic_stability(df, composite)
+        leakage = _bottom_leakage(df, composite, k=ndcg_k, bottom_pct=0.2)
+        tail = _tail_risk_penalty(df, composite, k=ndcg_k)
+
+        # Objective composition (all terms scaled to ~0.01..0.10 range):
+        #   IC_mean          ~ 0.02..0.10  (core signal quality)
+        #   NDCG_exp - 0.5   ~ -0.1..+0.4 (top-pick ordering, exp amplified)
+        #   MAP@K            ~ 0.1..0.6    (winner inclusion precision)
+        #   Mono * 0.1       ~ 0.03..0.10  (full-distribution ordering)
+        #   Leakage          ~ 0.0..0.3    (fraction of losers in top-K)
+        #   tail             ~ -0.15..0.0  (worst pick's fwd_ret, negative)
+        #   IC_std           ~ 0.05..0.15  (signal inconsistency)
+        j = (ic_mean
+             + lambda_ndcg * 0.5 * (ndcg_exp - 0.5)   # exponential NDCG (half weight vs MAP)
+             + lambda_ndcg * 0.5 * (map_k - 0.3)      # MAP@K centered at random baseline
+             + lambda_mono * mono * 0.1                # monotonicity
+             - lambda_ic_stability * ic_std            # instability penalty
+             - lambda_ndcg * 0.3 * leakage             # bottom-leakage penalty
+             + 0.1 * max(tail, -0.2))                  # tail-risk: cap penalty at -0.02
         return j
 
     # Default: blended (same as SLSQP objective)
@@ -1053,7 +1170,10 @@ def run_walk_forward(
         if len(test_df) > 0:
             m_te = _evaluate(test_df, w_smoothed, top_pct=args.top_pct, horizon_days=args.horizon_days, beta=args.beta)
         else:
-            m_te = {"ic": 0.0, "mono": 0.0, "q5q1": 0.0, "top_ret": 0.0, "ndcg_10": 0.0, "ic_std": 0.0, "ic_ir": 0.0}
+            m_te = {"ic": 0.0, "mono": 0.0, "q5q1": 0.0, "top_ret": 0.0,
+                    "ndcg_10": 0.0, "ndcg_10_exp": 0.0, "map_10": 0.0,
+                    "bottom_leakage": 0.0, "tail_risk": 0.0,
+                    "ic_std": 0.0, "ic_ir": 0.0}
            
         row = {
             "test_start": str(test_start),
@@ -1063,14 +1183,19 @@ def run_walk_forward(
             "Mono_test": round(m_te["mono"], 3),
             "TopRet_test_pct": round(100 * m_te["top_ret"], 2),
             "NDCG10_test": round(m_te["ndcg_10"], 4),
+            "NDCG10_exp_test": round(m_te["ndcg_10_exp"], 4),
+            "MAP10_test": round(m_te["map_10"], 4),
+            "BottomLeak_test": round(m_te["bottom_leakage"], 4),
+            "TailRisk_test": round(m_te["tail_risk"], 4),
             "IC_std_test": round(m_te["ic_std"], 4),
             "IC_IR_test": round(m_te["ic_ir"], 2),
         }
         results.append(row)
        
         w_str = ", ".join(f"{f[:4]}:{w_smoothed[k]:.2f}" for k, f in enumerate(FACTORS))
-        log.info("  -> w=[%s]  Test IC=%+.4f  Mono=%+.3f  TopRet=%+.1f%%  NDCG@10=%.3f  IC_IR=%.2f",
-                 w_str, m_te["ic"], m_te["mono"], 100 * m_te["top_ret"], m_te["ndcg_10"], m_te["ic_ir"])
+        log.info("  -> w=[%s]  Test IC=%+.4f  Mono=%+.3f  TopRet=%+.1f%%  NDCG@10=%.3f  MAP@10=%.3f  Leak=%.2f  Tail=%.3f",
+                 w_str, m_te["ic"], m_te["mono"], 100 * m_te["top_ret"],
+                 m_te["ndcg_10"], m_te["map_10"], m_te["bottom_leakage"], m_te["tail_risk"])
                  
     out_df = pd.DataFrame(results)
     csv_name = "walk_forward_lambdarank.csv" if args.method == "lambdarank" else "walk_forward_regression.csv"
@@ -1137,12 +1262,14 @@ def main() -> None:
                     help="Total evaluations for Bayesian BO (initial + GP-guided). Default 80.")
     ap.add_argument("--bayes-n-initial", type=int, default=15,
                     help="Random Dirichlet evaluations before GP takes over. Default 15.")
-    ap.add_argument("--bayes-objective", choices=["blended", "ic", "mono", "top_ret", "ranking"],
+    ap.add_argument("--bayes-objective", choices=["blended", "ic", "mono", "top_ret", "ranking", "ranking_v2"],
                     default="blended",
                     help="Objective for Bayesian BO. 'blended' = IC + λ·Mono + λ·SoftRet "
                          "(same as SLSQP). 'ic' = maximize IC only. 'mono' = maximize "
                          "monotonicity only. 'top_ret' = maximize top-quintile basket return. "
-                         "'ranking' = IC + NDCG@K + Mono - IC_std (streamlined ranking quality).")
+                         "'ranking' = IC + NDCG@K + Mono - IC_std (streamlined ranking quality). "
+                         "'ranking_v2' = enhanced with exponential NDCG + MAP@K + bottom-leakage "
+                         "penalty + tail-risk avoidance.")
     ap.add_argument("--ndcg-k", type=int, default=10,
                     help="Top-K for NDCG in 'ranking' objective (default 10).")
     ap.add_argument("--lambda-ndcg", type=float, default=1.0,

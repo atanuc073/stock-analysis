@@ -20,7 +20,6 @@ from config import REPORTS_DIR, WATCHLIST, WATCHLIST_INDIA, WATCHLIST_US
 
 from .data_loader import load_universe, trading_dates
 from .engine import BacktestConfig, BacktestEngine
-from portfolio.lifecycle import ExitConfig
 from .results import compute as compute_stats
 from .reporter import write_excel, write_markdown, write_chart
 from . import regime as regime_mod
@@ -112,75 +111,33 @@ def main(argv: list[str] | None = None) -> int:
                    help="Initial capital (default: 1,000,000)")
     p.add_argument("--universe", default="watchlist",
                    help="watchlist | india | us | broad | RELIANCE.NS,TCS.NS,...")
-    p.add_argument("--threshold", type=float, default=62.0,
+    p.add_argument("--threshold", type=float, default=60.0,
                    help="Min composite score to buy (default 62)")
+    p.add_argument("--max-score", type=float, default=100.0,
+                   help="Max composite score to buy (default 170.0)")
     p.add_argument("--rebalance-days", type=int, default=5,
                    help="Rebalance every N trading days (default 5 = weekly)")
     p.add_argument("--max-positions", type=int, default=12)
     p.add_argument("--max-extension", type=float, default=30.0,
-                   help="Max %% extension above 200DMA to buy (default 30.0). "
-                        "Backtest diagnostic shows the 30-40%% extension bucket "
-                        "has Avg_Fwd30 = -2.07%% (i.e. losing money on entry). "
-                        "Set 999 to disable; raise to 40+ to recover the late-cycle "
-                        "trend-following bucket at the cost of more drawdown.")
-    p.add_argument("--max-from-52wh", type=float, default=0.0,
-                   help="Require at least this %% pullback from 52w high "
-                        "(default 0.0 = disabled; e.g. -10 forces >=10%% pullback).")
-    p.add_argument("--allow-buy-at-high", action="store_true",
-                   help="Allow buys at 52WH without requiring a fresh breakout signal.")
-    p.add_argument("--min-rs-pct", type=float, default=0.0,
-                   help="Require RS percentile rank >= this (0-100, default 0 = no hard filter; "
-                        "try 70 for leaders-only). RS score bump is always applied either way.")
+                   help="Max %% extension above 200DMA to buy (default 30.0)")
     p.add_argument("--base-position-weight", type=float, default=0.15,
-                   help="Base weight allocated to each position (default 0.10 = 10%%)")
-    p.add_argument("--ignore-cash-floor", action="store_true",
-                   help="Bypass all regime-based cash floors to stay fully invested at all times.")
+                   help="Base weight allocated to each position (default 0.15 = 15%%)")
     p.add_argument("--max-sector-weight", type=float, default=0.30,
                    help="Max sector concentration weight (default 0.30)")
-    p.add_argument("--max-market-weight", type=float, default=0.99,
-                   help="Max country concentration weight (default 0.70)")
-    p.add_argument("--include-forecast", action="store_true",
-                   help="Include forecast component (slower)")
-    p.add_argument("--legacy-weights", action="store_true",
-                   help="Use legacy weight redistribution (drop sentiment/options/forecast "
-                        "and reallocate to technical+momentum). Default is live-equivalent "
-                        "weights with neutral 50 for missing components.")
     p.add_argument("--output-dir", default=None,
                    help="Output directory (default reports/backtest/)")
     p.add_argument("--uptrend", action="store_true",
                    help="Uptrend-only mode: use the Stage 2 / breakout score as the primary signal")
-    p.add_argument("--no-uptrend-confirm", action="store_true",
-                   help="Bypass strict Minervini Stage 2 / Trend Template filters and buy purely on score ranking.")
-    p.add_argument("--max-workers", type=int, default=8,
-                   help="Concurrent fetches (default 8)")
-    p.add_argument("--benchmark-india", default="^NSEI")
-    p.add_argument("--benchmark-us", default="^GSPC")
-    p.add_argument("--benchmark-india-broad", default="^CRSLDX",
-                   help="Broad IN benchmark (default Nifty 500: ^CRSLDX)")
-    p.add_argument("--benchmark-us-small", default="^RUT",
-                   help="US smallcap benchmark (default Russell 2000: ^RUT)")
     p.add_argument("--no-regime", action="store_true",
                    help="Disable regime-aware sizing (default: enabled)")
     p.add_argument("--regime-skip-below", default="NONE",
                    choices=["NONE", "BEAR", "CAUTIOUS", "NEUTRAL", "NEUTRAL_BULL", "BULL"],
-                   help="Skip new entries when regime label <= this (default NONE — "
-                        "May'26 audit showed CAUTIOUS trades contribute ~0%% of P&L)")
+                   help="Skip new entries when regime label <= this (default NONE)")
     p.add_argument("--sip-amount", type=float, default=0.0,
                    help="SIP amount per month (INR). 0 = lumpsum mode (default)")
     p.add_argument("--sip-day", type=int, default=13,
                    help="Day of month to inject SIP (default 13). Falls to next "
                         "trading day if non-trading.")
-    p.add_argument("--trail-stop-pct", type=float, default=None,
-                   help="Continuous trailing stop-loss from entry by N%% (e.g. 15 for 15%%)")
-    p.add_argument("--transaction-cost-bps", type=float, default=0.0,
-                   help="Transaction cost in bps (each side, one-way)")
-    p.add_argument("--slippage-bps", type=float, default=0.0,
-                   help="Slippage in bps (each side, one-way)")
-    p.add_argument("--warmup-days", type=int, default=0,
-                   help="Skip new entries for the first N trading days (default 0 = "
-                        "disabled). Data-loader fetches extra history separately.")
-    p.add_argument("--dynamic-weights", action="store_true",
-                   help="Load monthly walk-forward regression weights dynamically")
     args = p.parse_args(argv)
 
     output_dir = Path(args.output_dir) if args.output_dir else REPORTS_DIR / "backtest"
@@ -190,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     symbols = _resolve_universe(args.universe)
     log.info("Universe: %d symbols (%s)", len(symbols), args.universe)
 
-    data = load_universe(symbols, args.start, args.end, max_workers=args.max_workers)
+    data = load_universe(symbols, args.start, args.end, max_workers=8)
     if not data:
         log.error("No data loaded; aborting")
         return 1
@@ -207,36 +164,26 @@ def main(argv: list[str] | None = None) -> int:
         initial_capital=args.capital,
         rebalance_freq_days=args.rebalance_days,
         min_score=args.threshold,
+        max_score=args.max_score,
         max_positions=args.max_positions,
         max_sector_weight=args.max_sector_weight,
         max_extension_pct=args.max_extension,
-        max_pct_from_52w_high=args.max_from_52wh,
-        require_breakout_at_high=not args.allow_buy_at_high,
-        min_rs_pct=args.min_rs_pct,
-        max_market_weight=args.max_market_weight,
-        include_forecast=args.include_forecast,
-        live_weights=not args.legacy_weights,
         use_regime=not args.no_regime,
         regime_skip_below=args.regime_skip_below,
         sip_amount=args.sip_amount,
         sip_day_of_month=args.sip_day,
         uptrend_mode=args.uptrend,
-        transaction_cost_bps=args.transaction_cost_bps,
-        slippage_bps=args.slippage_bps,
-        warmup_days=args.warmup_days,
         base_position_weight=args.base_position_weight,
-        ignore_cash_floor=args.ignore_cash_floor,
-        require_uptrend_confirm=not args.no_uptrend_confirm,
         universe=args.universe,
     )
 
     # Pre-load benchmarks (also used as regime input)
     has_in = any(hd.is_indian for hd in data.values())
     has_us = any(not hd.is_indian for hd in data.values())
-    bench_in = _load_benchmark(args.benchmark_india, args.start, args.end) if has_in else pd.Series(dtype=float)
-    bench_us = _load_benchmark(args.benchmark_us, args.start, args.end) if has_us else pd.Series(dtype=float)
-    bench_in_broad = _load_benchmark(args.benchmark_india_broad, args.start, args.end) if has_in else pd.Series(dtype=float)
-    bench_us_small = _load_benchmark(args.benchmark_us_small, args.start, args.end) if has_us else pd.Series(dtype=float)
+    bench_in = _load_benchmark("^NSEI", args.start, args.end) if has_in else pd.Series(dtype=float)
+    bench_us = _load_benchmark("^GSPC", args.start, args.end) if has_us else pd.Series(dtype=float)
+    bench_in_broad = _load_benchmark("^CRSLDX", args.start, args.end) if has_in else pd.Series(dtype=float)
+    bench_us_small = _load_benchmark("^RUT", args.start, args.end) if has_us else pd.Series(dtype=float)
 
     regime_data: dict[str, dict[str, pd.Series]] = {}
     if cfg.use_regime:
@@ -254,11 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         log.info("Regime-aware sizing DISABLED")
 
-    exit_val = args.trail_stop_pct / 100.0 if args.trail_stop_pct else None
-    exit_cfg = ExitConfig(trail_stop_pct=exit_val) if exit_val else None
-    engine = BacktestEngine(data=data, config=cfg, exit_cfg=exit_cfg, regime_data=regime_data or None)
-    if args.dynamic_weights:
-        engine.dynamic_weights_csv = "D:\\MY_WORK\\stock_analysis\\reports\\regression\\walk_forward_regression.csv"
+    engine = BacktestEngine(data=data, config=cfg, exit_cfg=None, regime_data=regime_data or None)
     result = engine.run(dates)
 
     # 4) Stats
