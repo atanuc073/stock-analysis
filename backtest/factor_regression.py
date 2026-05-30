@@ -51,7 +51,7 @@ from tqdm import tqdm
 
 from .data_loader import load_universe
 from .scoring import score_at
-from .optimize import _resolve_universe  # reuse universe resolver
+from .cli import _resolve_universe  # reuse universe resolver
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -139,7 +139,7 @@ def build_factor_matrix(
         n_before = len(rows)
         for sym, hd in data.items():
             try:
-                s = score_at(hd, asof, include_forecast=False, live_weights=False)
+                s = score_at(hd, asof, include_forecast=False)
             except Exception:
                 skip_score += 1
                 continue
@@ -733,6 +733,91 @@ def bayesian_search_weights(
     return results
 
 
+def _evaluate_scores(
+    df: pd.DataFrame,
+    scores: np.ndarray,
+    top_pct: float = 0.2,
+    horizon_days: int = 21,
+) -> dict:
+    """Same metrics as _evaluate() but takes a precomputed score vector.
+
+    Used by non-linear scorers (e.g. LGBMRanker) where there is no single
+    weight vector w to evaluate.
+    """
+    ic = _grouped_ic(df, scores)
+    mono, spread = _quintile_monotonicity(df, scores)
+    top_ret = _topk_basket_return(df, scores, top_pct=top_pct, horizon_days=horizon_days)
+    return {"ic": ic, "mono": mono, "q5q1": spread, "top_ret": top_ret}
+
+
+def _lambdarank_labels(df: pd.DataFrame, n_bins: int = 5) -> np.ndarray:
+    """Per-date qcut of fwd_ret into integer relevance labels 0..n_bins-1.
+
+    LightGBM's lambdarank objective treats the integer as a graded relevance
+    (gain = label_gain[label]); the per-date grouping ensures we learn a
+    cross-sectional ranker, not a regressor.
+    """
+    def _bin(s: pd.Series) -> pd.Series:
+        try:
+            return pd.qcut(s, n_bins, labels=False, duplicates="drop").astype(float)
+        except ValueError:
+            return pd.Series(np.full(len(s), n_bins // 2, dtype=float), index=s.index)
+    y = df.groupby("date")["fwd_ret"].transform(_bin)
+    return y.fillna(n_bins // 2).astype(int).values
+
+
+def _lambdarank_groups(df: pd.DataFrame) -> np.ndarray:
+    """LightGBM `group` array: rows per rebalance date, in date order."""
+    return df.groupby("date", sort=True).size().values.astype(np.int64)
+
+
+def train_lambdarank(train_df: pd.DataFrame, args: argparse.Namespace):
+    """Fit a single LGBMRanker on a train slice.
+
+    Features = FACTORS columns (already per-date rank-transformed to 0-100 by
+    build_factor_matrix when --sub-decomp is on). Returns the fitted booster.
+    """
+    try:
+        from lightgbm import LGBMRanker
+    except ImportError as e:
+        raise RuntimeError(
+            "lightgbm is required for --method lambdarank. Install with: pip install lightgbm"
+        ) from e
+
+    train_df = train_df.sort_values("date").reset_index(drop=True)
+    X = train_df[FACTORS].values
+    y = _lambdarank_labels(train_df, n_bins=args.lgbm_label_bins)
+    grp = _lambdarank_groups(train_df)
+
+    mono = [1] * len(FACTORS) if args.lgbm_monotone else None
+
+    ranker = LGBMRanker(
+        objective="lambdarank",
+        metric="ndcg",
+        eval_at=[10, 25, 50],
+        label_gain=[0, 1, 3, 7, 15][: args.lgbm_label_bins],
+        num_leaves=args.lgbm_num_leaves,
+        min_child_samples=args.lgbm_min_child,
+        learning_rate=args.lgbm_lr,
+        n_estimators=args.lgbm_n_estimators,
+        feature_fraction=0.9,
+        bagging_fraction=0.8,
+        bagging_freq=5,
+        reg_lambda=1.0,
+        monotone_constraints=mono,
+        monotone_constraints_method="advanced" if mono else None,
+        verbose=-1,
+    )
+    ranker.fit(X, y, group=grp)
+    return ranker
+
+
+def predict_lambdarank(booster, df: pd.DataFrame) -> np.ndarray:
+    """Score a df with a fitted LGBMRanker; returns 1-D ndarray aligned to df rows."""
+    X = df[FACTORS].values
+    return booster.predict(X)
+
+
 def run_walk_forward(
     df: pd.DataFrame,
     args: argparse.Namespace,
@@ -791,6 +876,46 @@ def run_walk_forward(
             log.warning("Not enough train data, skipping fold.")
             continue
 
+        if args.method == "lambdarank":
+            try:
+                booster = train_lambdarank(train_df, args)
+            except RuntimeError as e:
+                log.error("%s", e)
+                return
+            # Persist per-fold model
+            models_dir = os.path.join(args.output_dir, "lambdarank_models")
+            os.makedirs(models_dir, exist_ok=True)
+            model_path = os.path.join(models_dir, f"fold{fold_idx:03d}_{test_start}.txt")
+            booster.booster_.save_model(model_path)
+
+            if len(test_df) > 0:
+                scores = predict_lambdarank(booster, test_df)
+                m_te = _evaluate_scores(test_df, scores, top_pct=args.top_pct, horizon_days=args.horizon_days)
+            else:
+                m_te = {"ic": 0.0, "mono": 0.0, "q5q1": 0.0, "top_ret": 0.0}
+
+            # Feature importance (gain) per fold
+            try:
+                imp = booster.booster_.feature_importance(importance_type="gain")
+                imp_row = {f"imp_{f}": float(imp[k]) for k, f in enumerate(FACTORS)}
+            except Exception:
+                imp_row = {f"imp_{f}": 0.0 for f in FACTORS}
+
+            row = {
+                "test_start": str(test_start),
+                "test_end": str(test_end),
+                "model_path": model_path,
+                **imp_row,
+                "IC_test": round(m_te["ic"], 4),
+                "Mono_test": round(m_te["mono"], 3),
+                "Q5Q1_test_pct": round(m_te["q5q1"], 2),
+                "TopRet_test_pct": round(100 * m_te["top_ret"], 2),
+            }
+            results.append(row)
+            log.info("  -> lambdarank fold %d  Test IC=%+.4f  Mono=%+.3f  Q5Q1=%+.2f%%  TopRet=%+.1f%%",
+                     fold_idx, m_te["ic"], m_te["mono"], m_te["q5q1"], 100 * m_te["top_ret"])
+            continue
+
         if args.method == "bayesian":
             cands = bayesian_search_weights(
                 train_df, **common_bayes_kw,
@@ -835,7 +960,8 @@ def run_walk_forward(
                  w_str, m_te["ic"], m_te["mono"], 100 * m_te["top_ret"])
                  
     out_df = pd.DataFrame(results)
-    csv_path = os.path.join(args.output_dir, "walk_forward_regression.csv")
+    csv_name = "walk_forward_lambdarank.csv" if args.method == "lambdarank" else "walk_forward_regression.csv"
+    csv_path = os.path.join(args.output_dir, csv_name)
     out_df.to_csv(csv_path, index=False)
     log.info("Saved WFO results to %s", csv_path)
     
@@ -867,10 +993,11 @@ def main() -> None:
                     help="Forward-return horizon in trading days (default 21 ~ 1 month).")
     ap.add_argument("--freq", default="ME",
                     help="Rebalance frequency for rows. ME=month-end, W-FRI=Friday-weekly.")
-    ap.add_argument("--method", choices=["slsqp", "bayesian", "compare"], default="slsqp",
+    ap.add_argument("--method", choices=["slsqp", "bayesian", "compare", "lambdarank"], default="slsqp",
                     help="Optimization method. 'slsqp' (default): multi-start SLSQP. "
                          "'bayesian': Gaussian Process BO with Expected Improvement — "
-                         "more sample-efficient for noisy rank-based objectives.")
+                         "more sample-efficient for noisy rank-based objectives. "
+                         "'lambdarank': LightGBM LGBMRanker (non-linear, WFO only).")
     ap.add_argument("--n-starts", type=int, default=200,
                     help="Random Dirichlet restarts for SLSQP.")
     ap.add_argument("--lambda-mono", type=float, default=0.5,
@@ -912,6 +1039,18 @@ def main() -> None:
                     help="Step size in months for WFO test period (default 1).")
     ap.add_argument("--wf-smoothing", type=float, default=0.0,
                     help="Weight smoothing factor. 0.0=no smoothing, 0.7=70%% old weight + 30%% new weight.")
+
+    # ── LightGBM lambdarank args (only used when --method lambdarank) ─────────
+    ap.add_argument("--lgbm-num-leaves", type=int, default=15)
+    ap.add_argument("--lgbm-min-child", type=int, default=50,
+                    help="min_child_samples; raise for noisier cross-sections.")
+    ap.add_argument("--lgbm-lr", type=float, default=0.03, help="LightGBM learning_rate.")
+    ap.add_argument("--lgbm-n-estimators", type=int, default=400)
+    ap.add_argument("--lgbm-label-bins", type=int, default=5,
+                    help="Per-date qcut bins → relevance labels 0..bins-1 (default 5 = quintiles).")
+    ap.add_argument("--lgbm-monotone", action="store_true", default=True,
+                    help="Apply +1 monotone constraint on every feature (assumes higher rank=better).")
+    ap.add_argument("--no-lgbm-monotone", dest="lgbm_monotone", action="store_false")
 
     ap.add_argument("--cache-matrix", default=None,
                     help="Parquet path for the (stock x date) factor matrix. "
@@ -1057,6 +1196,10 @@ def main() -> None:
         if args.test_end:
             df_all = df_all[df_all["date"] <= args.test_end].copy()
         run_walk_forward(df_all, args, _common_bayes_kw, _common_slsqp_kw)
+        return
+
+    if args.method == "lambdarank":
+        log.error("--method lambdarank requires --walk-forward (no static-split path implemented).")
         return
 
     train = df_all[(df_all["date"] >= args.train_start) & (df_all["date"] <= args.train_end)].copy()
@@ -1237,19 +1380,9 @@ def main() -> None:
     if healthy and best["IC_test"] > 0 and best["IC_val"] > 0 and best["IC_train"] > 0 and abs(best["gap_ic"]) <= 0.02:
         print("  [OK] Healthy: positive IC on all 3 splits, small train→val degradation.")
 
-    # ── Suggested SCORE_WEIGHTS block (paste into config.py) ─────────────────
-    print("\n" + "-" * 110)
-    print("SUGGESTED SCORE_WEIGHTS (best candidate, paste into config.py):")
-    print("-" * 110)
-    print("SCORE_WEIGHTS = {")
-    for f in FACTORS:
-        print(f'    "{f}":{" " * (16 - len(f))}{best["w_" + f]:.3f},')
-    print("}")
-
     print("\nOutputs:")
     print(f"  {csv_path}")
     print(f"  {os.path.join(args.output_dir, 'candidates_by_train.csv')}")
-    print(f"\nNext step: feed the top weights into backtest.optimize for full walk-forward validation.")
 
 
 if __name__ == "__main__":
