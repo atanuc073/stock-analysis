@@ -85,7 +85,10 @@ python -m backtest.cli --start 2023-01-01 --end 2024-12-31 --universe us --thres
   --output-dir reports/optimize/random_20_sample_200
 
 
- python -m  backtest.factor_regression --walk-forward --method bayesian --wf-lookback 36 --wf-step 1 --wf-smoothing 0.7 --rebuild-matrix --universe sp500 --bayes-n-calls 120 --bayes-n-initial 20 --sub-decomp 
+ python -m  backtest.factor_regression --walk-forward --method bayesian --wf-lookback 36 --wf-step 1 --wf-smoothing 0.7 --rebuild-matrix --universe sp500 --bayes-n-calls 120 --bayes-n-initial 20 --sub-decomp --lambda-ndcg 1.0 --lambda-ic-stability 0.5 --ndcg-k 10
+
+python -m backtest.factor_regression --walk-forward --rebuild-matrix --universe nifty500 --sub-decomp --train-start 2020-01-01 --test-end 2026-05-24 --method lambdarank
+
 
 
  python -m backtest.cli --start 2023-01-01 --end 2026-05-28 --universe nifty500 --output-dir reports/backtest/sp500_dynamic --dynamic-weights --no-regime

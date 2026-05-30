@@ -254,6 +254,63 @@ def _quintile_monotonicity(df: pd.DataFrame, composite: np.ndarray) -> tuple[flo
     return mono, spread
 
 
+def _ndcg_at_k(df: pd.DataFrame, composite: np.ndarray, k: int = 10) -> float:
+    """Per-date NDCG@K averaged across dates.
+
+    For each rebalance date:
+      - ideal ranking = descending fwd_ret
+      - predicted ranking = descending composite score
+      - NDCG@K measures how well predicted top-K matches ideal top-K
+
+    This directly measures whether the scoring system places the best future
+    performers at the top of the list — which is exactly what a stock ranker needs.
+    """
+    s = df.assign(composite=composite)
+    ndcgs: list[float] = []
+    for _, g in s.groupby("date"):
+        if len(g) < k:
+            continue
+        # Ideal: sort by fwd_ret desc → relevance gains
+        ideal = g.nlargest(len(g), "fwd_ret")["fwd_ret"].values
+        # Predicted: sort by composite desc
+        pred_order = g.nlargest(len(g), "composite")["fwd_ret"].values
+
+        # DCG@K with gain = max(0, fwd_ret) to avoid penalizing negatives excessively
+        def _dcg(rels: np.ndarray, at_k: int) -> float:
+            rels_k = rels[:at_k]
+            # Use 2^rel - 1 gain with shifted rels so all are non-negative
+            # Simpler: use raw return as gain (linear gain, more interpretable)
+            discounts = np.log2(np.arange(2, at_k + 2))
+            return float(np.sum(rels_k / discounts))
+
+        dcg = _dcg(pred_order, k)
+        idcg = _dcg(ideal, k)
+        if idcg > 0:
+            ndcgs.append(dcg / idcg)
+        elif idcg == 0:
+            ndcgs.append(1.0)  # perfect if nothing to gain
+    return float(np.mean(ndcgs)) if ndcgs else 0.0
+
+
+def _ic_stability(df: pd.DataFrame, composite: np.ndarray) -> tuple[float, float]:
+    """Per-date IC mean and std. Returns (mean_ic, ic_std).
+
+    A good ranker has high mean IC AND low IC_std (consistent signal).
+    IC_IR = mean / std is the information ratio of the ranking signal.
+    """
+    s = df.assign(composite=composite)
+    ics: list[float] = []
+    for _, g in s.groupby("date"):
+        if len(g) < 10:
+            continue
+        rho, _ = spearmanr(g["composite"].values, g["fwd_ret"].values, nan_policy="omit")
+        if np.isfinite(rho):
+            ics.append(float(rho))
+    if not ics:
+        return 0.0, 1.0
+    return float(np.mean(ics)), float(np.std(ics))
+
+
 def _topk_basket_return(
     df: pd.DataFrame,
     composite: np.ndarray,
@@ -373,7 +430,13 @@ def _evaluate(
     top_ret = _topk_basket_return(df, composite, top_pct=top_pct, horizon_days=horizon_days)
     groups = _precompute_groups(df)
     soft_ret = _softmax_basket_return_grouped(groups, w, beta=beta, horizon_days=horizon_days)
-    return {"ic": ic, "mono": mono, "q5q1": spread, "top_ret": top_ret, "soft_ret": soft_ret}
+    ndcg = _ndcg_at_k(df, composite, k=10)
+    ic_mean, ic_std = _ic_stability(df, composite)
+    return {
+        "ic": ic, "mono": mono, "q5q1": spread,
+        "top_ret": top_ret, "soft_ret": soft_ret,
+        "ndcg_10": ndcg, "ic_std": ic_std, "ic_ir": ic_mean / ic_std if ic_std > 0 else 0.0,
+    }
 
 
 # ── Optimization ──────────────────────────────────────────────────────────────
@@ -516,10 +579,26 @@ def _eval_objective_for_bayes(
     beta: float,
     horizon_days: int,
     top_pct: float = 0.2,
+    ndcg_k: int = 10,
+    lambda_ndcg: float = 1.0,
+    lambda_ic_stability: float = 0.5,
 ) -> float:
     """Evaluate a single objective value for Bayesian optimization.
 
     Returns the value to MAXIMIZE.
+
+    Objectives:
+      'ic'       : Spearman IC only
+      'mono'     : Quintile monotonicity only
+      'top_ret'  : Top-quintile basket annualized return
+      'blended'  : IC + λ_mono*Mono + λ_cagr*SoftRet (legacy)
+      'ranking'  : Streamlined ranking objective:
+                   J = IC_mean
+                       + λ_ndcg * NDCG@K
+                       + λ_mono * Monotonicity
+                       - λ_ic_stability * IC_std
+                   Directly measures: does the scoring produce the right order?
+                   Penalizes: unstable signal (high IC variance across dates).
     """
     F = df[FACTORS].values
     composite = F @ w
@@ -534,6 +613,22 @@ def _eval_objective_for_bayes(
 
     if objective == "top_ret":
         return _topk_basket_return(df, composite, top_pct=top_pct, horizon_days=horizon_days)
+
+    if objective == "ranking":
+        # Streamlined: IC + NDCG + Mono - instability
+        ndcg = _ndcg_at_k(df, composite, k=ndcg_k)
+        ic_mean, ic_std = _ic_stability(df, composite)
+        # Scale contributions to comparable ranges:
+        #   IC_mean   ~ 0.02..0.10
+        #   NDCG@K    ~ 0.5..0.9  (needs scaling down)
+        #   Mono      ~ 0.3..1.0  (needs scaling down)
+        #   IC_std    ~ 0.05..0.15 (penalty)
+        # Normalize NDCG from [0,1] to IC-comparable scale:
+        j = (ic_mean
+             + lambda_ndcg * (ndcg - 0.5)   # center NDCG so random=0 contribution
+             + lambda_mono * mono * 0.1      # scale mono (~1.0) to IC scale (~0.1)
+             - lambda_ic_stability * ic_std)  # penalize instability
+        return j
 
     # Default: blended (same as SLSQP objective)
     soft_ret = 0.0
@@ -569,6 +664,9 @@ def bayesian_search_weights(
     output_dir: str = "reports/regression",
     top_pct: float = 0.2,
     convergence_suffix: str = "",
+    ndcg_k: int = 10,
+    lambda_ndcg: float = 1.0,
+    lambda_ic_stability: float = 0.5,
 ) -> list[tuple[np.ndarray, float]]:
     """Bayesian (GP) optimization on the simplex via softmax reparameterization.
 
@@ -581,7 +679,12 @@ def bayesian_search_weights(
     ----------
     n_calls : total evaluations (initial random + GP-guided). ~60-100 is typical.
     n_initial : random Dirichlet points before GP takes over.
-    objective : 'blended' (IC + lam*Mono + lam*SoftRet), 'ic', 'mono', or 'top_ret'.
+    objective : 'blended', 'ic', 'mono', 'top_ret', or 'ranking'.
+        'ranking' combines IC + NDCG@K + Mono - IC_std for a streamlined
+        ranking-quality objective.
+    ndcg_k : top-K for NDCG computation (default 10).
+    lambda_ndcg : weight on NDCG@K in the 'ranking' objective (default 1.0).
+    lambda_ic_stability : penalty on IC_std in the 'ranking' objective (default 0.5).
     output_dir : directory for convergence CSV.
     top_pct : top fraction used when objective='top_ret'.
     convergence_suffix : appended to 'bayesian_convergence' filename so WFO
@@ -599,6 +702,9 @@ def bayesian_search_weights(
     log.info("=" * 80)
     log.info("  objective=%s  n_calls=%d  n_initial=%d  lambda_mono=%.2f  lambda_cagr=%.2f  beta=%.1f",
              objective, n_calls, n_initial, lambda_mono, lambda_cagr, beta)
+    if objective == "ranking":
+        log.info("  RANKING MODE: ndcg_k=%d  lambda_ndcg=%.2f  lambda_ic_stability=%.2f",
+                 ndcg_k, lambda_ndcg, lambda_ic_stability)
 
     # ── Phase 1: random initial evaluations (Dirichlet on simplex) ────────
     Z_observed: list[np.ndarray] = []  # unconstrained space
@@ -620,6 +726,8 @@ def bayesian_search_weights(
             df_train, w, groups, objective,
             lambda_mono, lambda_cagr, beta, horizon_days,
             top_pct=top_pct,
+            ndcg_k=ndcg_k, lambda_ndcg=lambda_ndcg,
+            lambda_ic_stability=lambda_ic_stability,
         )
         Z_observed.append(z)
         Y_observed.append(J)
@@ -675,6 +783,8 @@ def bayesian_search_weights(
             df_train, w_next, groups, objective,
             lambda_mono, lambda_cagr, beta, horizon_days,
             top_pct=top_pct,
+            ndcg_k=ndcg_k, lambda_ndcg=lambda_ndcg,
+            lambda_ic_stability=lambda_ic_stability,
         )
         Z_observed.append(z_next)
         Y_observed.append(J)
@@ -832,24 +942,24 @@ def run_walk_forward(
 
     # Find all unique rebalance dates and sort them
     dates = pd.Series(df["date"].unique()).sort_values().reset_index(drop=True)
-    
+   
     if len(dates) == 0:
         log.error("No dates available for WFO.")
         return
-        
+       
     # We will step month by month. To do this robustly, we use YearMonth periods
     df["ym"] = df["date"].dt.to_period("M")
     months = pd.Series(df["ym"].unique()).sort_values().reset_index(drop=True)
-    
+   
     if len(months) <= args.wf_lookback:
         log.error("Not enough months for WFO lookback. Have %d, need >%d", len(months), args.wf_lookback)
         return
-        
+       
     log.info("=" * 80)
     log.info("WALK-FORWARD OPTIMIZATION (WFO)")
     log.info("=" * 80)
     log.info("  Lookback: %d months  Step: %d month(s)  Smoothing: %.2f", args.wf_lookback, args.wf_step, args.wf_smoothing)
-    
+   
     results = []
     prev_w = None
     fold_idx = 0
@@ -858,16 +968,16 @@ def run_walk_forward(
         fold_idx += 1
         train_start = months.iloc[i - args.wf_lookback]
         train_end = months.iloc[i - 1]
-        
+       
         test_start = months.iloc[i]
         test_end = months.iloc[min(i + args.wf_step - 1, len(months) - 1)]
-        
+       
         train_mask = (df["ym"] >= train_start) & (df["ym"] <= train_end)
         test_mask = (df["ym"] >= test_start) & (df["ym"] <= test_end)
-        
+       
         train_df = df[train_mask].copy()
         test_df = df[test_mask].copy()
-        
+       
         log.info("-" * 80)
         log.info("WFO Fold %d: Train [%s .. %s] (rows=%d) -> Test [%s .. %s] (rows=%d)",
                  fold_idx, train_start, train_end, len(train_df), test_start, test_end, len(test_df))
@@ -923,28 +1033,28 @@ def run_walk_forward(
             )
         else:
             cands = search_weights(train_df, **common_slsqp_kw)
-            
+           
         if not cands:
             log.warning("No candidates found, skipping fold.")
             continue
-            
+           
         w_best, j_best = cands[0]
-        
+       
         # Apply smoothing
         if prev_w is not None and args.wf_smoothing > 0:
             w_smoothed = args.wf_smoothing * prev_w + (1.0 - args.wf_smoothing) * w_best
             w_smoothed = w_smoothed / w_smoothed.sum()  # Re-normalize
         else:
             w_smoothed = w_best
-            
+           
         prev_w = w_smoothed
-        
+       
         # Evaluate on test
         if len(test_df) > 0:
             m_te = _evaluate(test_df, w_smoothed, top_pct=args.top_pct, horizon_days=args.horizon_days, beta=args.beta)
         else:
-            m_te = {"ic": 0.0, "mono": 0.0, "q5q1": 0.0, "top_ret": 0.0}
-            
+            m_te = {"ic": 0.0, "mono": 0.0, "q5q1": 0.0, "top_ret": 0.0, "ndcg_10": 0.0, "ic_std": 0.0, "ic_ir": 0.0}
+           
         row = {
             "test_start": str(test_start),
             "test_end": str(test_end),
@@ -952,19 +1062,22 @@ def run_walk_forward(
             "IC_test": round(m_te["ic"], 4),
             "Mono_test": round(m_te["mono"], 3),
             "TopRet_test_pct": round(100 * m_te["top_ret"], 2),
+            "NDCG10_test": round(m_te["ndcg_10"], 4),
+            "IC_std_test": round(m_te["ic_std"], 4),
+            "IC_IR_test": round(m_te["ic_ir"], 2),
         }
         results.append(row)
-        
+       
         w_str = ", ".join(f"{f[:4]}:{w_smoothed[k]:.2f}" for k, f in enumerate(FACTORS))
-        log.info("  -> w=[%s]  Test IC=%+.4f  Mono=%+.3f  TopRet=%+.1f%%",
-                 w_str, m_te["ic"], m_te["mono"], 100 * m_te["top_ret"])
+        log.info("  -> w=[%s]  Test IC=%+.4f  Mono=%+.3f  TopRet=%+.1f%%  NDCG@10=%.3f  IC_IR=%.2f",
+                 w_str, m_te["ic"], m_te["mono"], 100 * m_te["top_ret"], m_te["ndcg_10"], m_te["ic_ir"])
                  
     out_df = pd.DataFrame(results)
     csv_name = "walk_forward_lambdarank.csv" if args.method == "lambdarank" else "walk_forward_regression.csv"
     csv_path = os.path.join(args.output_dir, csv_name)
     out_df.to_csv(csv_path, index=False)
     log.info("Saved WFO results to %s", csv_path)
-    
+   
     print("\n" + "=" * 100)
     print("WALK-FORWARD OPTIMIZATION SUMMARY")
     print("=" * 100)
@@ -1024,11 +1137,18 @@ def main() -> None:
                     help="Total evaluations for Bayesian BO (initial + GP-guided). Default 80.")
     ap.add_argument("--bayes-n-initial", type=int, default=15,
                     help="Random Dirichlet evaluations before GP takes over. Default 15.")
-    ap.add_argument("--bayes-objective", choices=["blended", "ic", "mono", "top_ret"],
+    ap.add_argument("--bayes-objective", choices=["blended", "ic", "mono", "top_ret", "ranking"],
                     default="blended",
                     help="Objective for Bayesian BO. 'blended' = IC + λ·Mono + λ·SoftRet "
                          "(same as SLSQP). 'ic' = maximize IC only. 'mono' = maximize "
-                         "monotonicity only. 'top_ret' = maximize top-quintile basket return.")
+                         "monotonicity only. 'top_ret' = maximize top-quintile basket return. "
+                         "'ranking' = IC + NDCG@K + Mono - IC_std (streamlined ranking quality).")
+    ap.add_argument("--ndcg-k", type=int, default=10,
+                    help="Top-K for NDCG in 'ranking' objective (default 10).")
+    ap.add_argument("--lambda-ndcg", type=float, default=1.0,
+                    help="Weight on NDCG@K in 'ranking' objective (default 1.0).")
+    ap.add_argument("--lambda-ic-stability", type=float, default=0.5,
+                    help="Penalty on IC_std in 'ranking' objective (default 0.5).")
                          
     # ── Walk-Forward args ─────────────────────────────────────────────────────
     ap.add_argument("--walk-forward", action="store_true",
@@ -1185,6 +1305,8 @@ def main() -> None:
         lambda_cagr=args.lambda_cagr, beta=args.beta,
         horizon_days=args.horizon_days, output_dir=args.output_dir,
         top_pct=args.top_pct,
+        ndcg_k=args.ndcg_k, lambda_ndcg=args.lambda_ndcg,
+        lambda_ic_stability=args.lambda_ic_stability,
     )
     _common_slsqp_kw = dict(
         n_starts=args.n_starts, lambda_mono=args.lambda_mono,
